@@ -78,7 +78,7 @@ def generate_filename(tweet: Dict, prefix: str = "") -> str:
     dt_utc = convert_to_utc(tweet["created_at"])
     return f"{prefix}{dt_utc.strftime('%Y%m%d%H%M')}"
 
-def process_tweet(tweet: Dict) -> None:
+def build_graph(tweet: Dict) -> None:
     """Process each tweet, classify it, and build the reply graph."""
     tweet_id: str = tweet["id_str"]
     tweet_map[tweet_id] = tweet
@@ -111,10 +111,10 @@ def format_markdown(tweet: Dict) -> str:
     return "".join(content)
 
 # Process tweets and build the graph
-for item in track(tweets_data, description="Processing tweets..."):
+for item in track(tweets_data: List[Dict], description="Processing tweets..."):
     tweet: Dict = item["tweet"]
     tweet["user_id"] = tweet.get("user", {}).get("id_str", "")  # Ensure user ID is present
-    process_tweet(tweet)
+    build_graph(tweet)
 
 # Process and save tweets as markdown files
 for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
