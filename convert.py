@@ -54,8 +54,9 @@ def find_thread_root(tweet_id):
         tweet_id = predecessors[0]
 
 def get_thread_sequence(root_id):
-    """Retrieve the tweets in a thread in the correct order."""
-    return list(nx.dfs_preorder_nodes(reply_graph, source=root_id))
+    """Retrieve the tweets in a thread in the correct order based on creation time."""
+    tweets = [(t, convert_to_utc(tweet_map[t]["created_at"])) for t in nx.dfs_preorder_nodes(reply_graph, source=root_id)]
+    return [t[0] for t in sorted(tweets, key=lambda x: x[1])]
 
 def classify_tweet(tweet):
     """Classify tweet as Post, Reply, or Thread."""
@@ -65,8 +66,7 @@ def classify_tweet(tweet):
     elif text.startswith("@"):  # Identifies replies
         return "Reply"
     elif tweet["user_id"] == user_id:
-        root_id = find_thread_root(tweet["id_str"])
-        if root_id != tweet["id_str"]:
+        if any(reply_graph.successors(tweet["id_str"])):
             return "Thread"
     return "Post"
 
@@ -120,10 +120,15 @@ for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
         root_id = find_thread_root(tweet_id)
         sequence = get_thread_sequence(root_id)
         thread_text = "\n\n".join([tweet_map[t]["full_text"] for t in sequence])
+        tweet = tweet_map[root_id]  # Use the first tweet as reference
         tweet["full_text"] = thread_text  # Update text with ordered thread content
-    filename = generate_filename(tweet)
-    markdown_content = format_markdown(tweet)
-    save_markdown(filename, markdown_content, subdir=tweet_type.lower() + "s")
+        filename = generate_filename(tweet)
+        markdown_content = format_markdown(tweet)
+        save_markdown(filename, markdown_content, subdir="threads")
+    else:
+        filename = generate_filename(tweet)
+        markdown_content = format_markdown(tweet)
+        save_markdown(filename, markdown_content, subdir=tweet_type.lower() + "s")
 
 # Display final statistics
 stats = {key: sum(1 for t in tweet_map.values() if classify_tweet(t) == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
