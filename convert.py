@@ -3,6 +3,7 @@ import json
 import logging
 import argparse
 import requests
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from collections import defaultdict
 from rich.console import Console
@@ -44,6 +45,14 @@ def convert_to_utc(dt_str):
     dt = datetime.strptime(dt_str, "%a %b %d %H:%M:%S +0000 %Y")
     return dt.replace(tzinfo=timezone.utc)
 
+def resolve_url(url):
+    """Resolve a shortened URL to its final destination."""
+    try:
+        response = requests.head(url, allow_redirects=True)
+        return response.url
+    except requests.RequestException:
+        return url
+
 def classify_tweet(tweet):
     """Classify tweet as Post, Reply, or Thread."""
     text = tweet["full_text"].strip()
@@ -59,16 +68,8 @@ def extract_quoted_tweet_url(tweet):
     """Extract quoted tweet URL if present."""
     words = tweet["full_text"].split()
     if words and words[-1].startswith("https://t.co/"):
-        return words[-1]
+        return resolve_url(words[-1])
     return None
-
-def resolve_twitter_url(url):
-    """Resolve Twitter URL to its final redirected URL."""
-    try:
-        response = requests.head(url, allow_redirects=True)
-        return response.url
-    except requests.RequestException:
-        return url
 
 def generate_filename(tweet, prefix=""):
     """Generate a filename based on tweet creation time."""
@@ -114,11 +115,9 @@ def format_markdown(tweet, thread=False):
             content.append(f"Replying to {{< twitter_simple id=\"{reply_to_id}\" >}}\n\n")
 
     quoted_url = extract_quoted_tweet_url(tweet)
-    if quoted_url:
-        resolved_url = resolve_twitter_url(quoted_url)
-        if "https://x.com/" in resolved_url:
-            tweet_id = resolved_url.split("status/")[-1]
-            content.append(f"Quoted Tweet: {{< twitter_simple id=\"{tweet_id}\" >}}\n\n")
+    if quoted_url and "https://x.com/" in quoted_url:
+        tweet_id = quoted_url.split("status/")[-1]
+        content.append(f"Quoted Tweet: {{< twitter_simple id=\"{tweet_id}\" >}}\n\n")
 
     if thread:
         for node in nx.dfs_preorder_nodes(reply_graph, source=tweet["id_str"]):
