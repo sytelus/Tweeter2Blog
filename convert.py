@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import argparse
 from datetime import datetime, timezone
 from collections import defaultdict
 from rich.console import Console
@@ -18,11 +19,17 @@ logging.basicConfig(
 )
 log = logging.getLogger("rich")
 
-# Load tweets from JSON file
-input_file = "sample.json"
-output_dir = "output"
+# Parse arguments
+parser = argparse.ArgumentParser(description="Process tweets and generate markdown files.")
+parser.add_argument("--input", required=True, help="Path to the input JSON file")
+parser.add_argument("--output", required=True, help="Path to the output directory")
+args = parser.parse_args()
+
+input_file = args.input
+output_dir = args.output
 os.makedirs(output_dir, exist_ok=True)
 
+# Load tweets from JSON file
 with open(input_file, "r", encoding="utf-8") as f:
     tweets_data = json.load(f)
 
