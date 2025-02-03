@@ -45,13 +45,17 @@ def convert_to_utc(dt_str):
     dt = datetime.strptime(dt_str, "%a %b %d %H:%M:%S +0000 %Y")
     return dt.replace(tzinfo=timezone.utc)
 
-def resolve_url(url):
-    """Resolve a shortened URL to its final destination."""
-    try:
-        response = requests.head(url, allow_redirects=True)
-        return response.url
-    except requests.RequestException:
-        return url
+def find_thread_root(tweet_id):
+    """Find the root tweet of a thread by traversing up the reply chain."""
+    while True:
+        predecessors = list(reply_graph.predecessors(tweet_id))
+        if not predecessors:
+            return tweet_id
+        tweet_id = predecessors[0]
+
+def get_thread_sequence(root_id):
+    """Retrieve the tweets in a thread in the correct order."""
+    return list(nx.dfs_preorder_nodes(reply_graph, source=root_id))
 
 def classify_tweet(tweet):
     """Classify tweet as Post, Reply, or Thread."""
@@ -60,16 +64,11 @@ def classify_tweet(tweet):
         return "Retweet"
     elif text.startswith("@"):  # Identifies replies
         return "Reply"
-    elif tweet.get("in_reply_to_status_id_str") and tweet["in_reply_to_user_id_str"] == user_id:
-        return "Thread"
+    elif tweet["user_id"] == user_id:
+        root_id = find_thread_root(tweet["id_str"])
+        if root_id != tweet["id_str"]:
+            return "Thread"
     return "Post"
-
-def extract_quoted_tweet_url(tweet):
-    """Extract quoted tweet URL if present."""
-    words = tweet["full_text"].split()
-    if words and words[-1].startswith("https://t.co/"):
-        return resolve_url(words[-1])
-    return None
 
 def generate_filename(tweet, prefix=""):
     """Generate a filename based on tweet creation time."""
@@ -93,7 +92,7 @@ def save_markdown(filename, content, subdir):
         f.write(content)
     log.info(f"Saved: {file_path}")
 
-def format_markdown(tweet, thread=False):
+def format_markdown(tweet):
     """Format tweet or thread as a markdown file."""
     content = []
     date_utc = convert_to_utc(tweet["created_at"]).isoformat()
@@ -105,26 +104,7 @@ def format_markdown(tweet, thread=False):
     content.append(f"---\n\n")
 
     text = tweet["full_text"]
-    if text.startswith("RT @"):
-        user = tweet["entities"]["user_mentions"][0]["screen_name"]
-        content.append(f"Retweet of [@{user}](https://x.com/{user}):\n\n")
-
-    if text.startswith("@"):  # Reply handling
-        reply_to_id = tweet.get("in_reply_to_status_id_str")
-        if reply_to_id:
-            content.append(f"Replying to {{< twitter_simple id=\"{reply_to_id}\" >}}\n\n")
-
-    quoted_url = extract_quoted_tweet_url(tweet)
-    if quoted_url and "https://x.com/" in quoted_url:
-        tweet_id = quoted_url.split("status/")[-1]
-        content.append(f"Quoted Tweet: {{< twitter_simple id=\"{tweet_id}\" >}}\n\n")
-
-    if thread:
-        for node in nx.dfs_preorder_nodes(reply_graph, source=tweet["id_str"]):
-            content.append(tweet_map[node]["full_text"])
-            content.append("\n\n")
-    else:
-        content.append(text)
+    content.append(text)
     return "".join(content)
 
 # Process tweets and build the graph
@@ -136,9 +116,13 @@ for item in track(tweets_data, description="Processing tweets..."):
 # Process and save tweets as markdown files
 for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
     tweet_type = classify_tweet(tweet)
+    if tweet_type == "Thread":
+        root_id = find_thread_root(tweet_id)
+        sequence = get_thread_sequence(root_id)
+        thread_text = "\n\n".join([tweet_map[t]["full_text"] for t in sequence])
+        tweet["full_text"] = thread_text  # Update text with ordered thread content
     filename = generate_filename(tweet)
-
-    markdown_content = format_markdown(tweet, thread=(tweet_type == "Thread"))
+    markdown_content = format_markdown(tweet)
     save_markdown(filename, markdown_content, subdir=tweet_type.lower() + "s")
 
 # Display final statistics
