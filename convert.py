@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import argparse
+import requests
 from datetime import datetime, timezone
 from collections import defaultdict
 from rich.console import Console
@@ -23,10 +24,12 @@ log = logging.getLogger("rich")
 parser = argparse.ArgumentParser(description="Process tweets and generate markdown files.")
 parser.add_argument("--input", required=True, help="Path to the input JSON file")
 parser.add_argument("--output", required=True, help="Path to the output directory")
+parser.add_argument("--user_id", required=True, help="User ID to identify threads")
 args = parser.parse_args()
 
 input_file = args.input
 output_dir = args.output
+user_id = args.user_id
 os.makedirs(output_dir, exist_ok=True)
 
 # Load tweets from JSON file
@@ -43,13 +46,29 @@ def convert_to_utc(dt_str):
 
 def classify_tweet(tweet):
     """Classify tweet as Post, Reply, or Thread."""
-    if tweet.get("retweeted"):
+    text = tweet["full_text"].strip()
+    if text.startswith("RT @"):
         return "Retweet"
-    elif tweet.get("in_reply_to_status_id_str"):
-        if tweet["in_reply_to_user_id_str"] == tweet["user_id"]:
-            return "Thread"
+    elif text.startswith("@"):  # Identifies replies
         return "Reply"
+    elif tweet.get("in_reply_to_status_id_str") and tweet["in_reply_to_user_id_str"] == user_id:
+        return "Thread"
     return "Post"
+
+def extract_quoted_tweet_url(tweet):
+    """Extract quoted tweet URL if present."""
+    words = tweet["full_text"].split()
+    if words and words[-1].startswith("https://t.co/"):
+        return words[-1]
+    return None
+
+def resolve_twitter_url(url):
+    """Resolve Twitter URL to its final redirected URL."""
+    try:
+        response = requests.head(url, allow_redirects=True)
+        return response.url
+    except requests.RequestException:
+        return url
 
 def generate_filename(tweet, prefix=""):
     """Generate a filename based on tweet creation time."""
@@ -84,12 +103,29 @@ def format_markdown(tweet, thread=False):
     content.append(f"slug: \"{tweet['id_str']}\"\n")
     content.append(f"---\n\n")
 
+    text = tweet["full_text"]
+    if text.startswith("RT @"):
+        user = tweet["entities"]["user_mentions"][0]["screen_name"]
+        content.append(f"Retweet of [@{user}](https://x.com/{user}):\n\n")
+
+    if text.startswith("@"):  # Reply handling
+        reply_to_id = tweet.get("in_reply_to_status_id_str")
+        if reply_to_id:
+            content.append(f"Replying to {{< twitter_simple id=\"{reply_to_id}\" >}}\n\n")
+
+    quoted_url = extract_quoted_tweet_url(tweet)
+    if quoted_url:
+        resolved_url = resolve_twitter_url(quoted_url)
+        if "https://x.com/" in resolved_url:
+            tweet_id = resolved_url.split("status/")[-1]
+            content.append(f"Quoted Tweet: {{< twitter_simple id=\"{tweet_id}\" >}}\n\n")
+
     if thread:
         for node in nx.dfs_preorder_nodes(reply_graph, source=tweet["id_str"]):
             content.append(tweet_map[node]["full_text"])
             content.append("\n\n")
     else:
-        content.append(tweet["full_text"])
+        content.append(text)
     return "".join(content)
 
 # Process tweets and build the graph
@@ -103,19 +139,11 @@ for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
     tweet_type = classify_tweet(tweet)
     filename = generate_filename(tweet)
 
-    if tweet_type == "Retweet" and not tweet.get("is_quote_status", False):
-        continue  # Skip retweets without quotes
-
     markdown_content = format_markdown(tweet, thread=(tweet_type == "Thread"))
     save_markdown(filename, markdown_content, subdir=tweet_type.lower() + "s")
 
 # Display final statistics
-stats = {
-    "Posts": sum(1 for t in tweet_map.values() if classify_tweet(t) == "Post"),
-    "Replies": sum(1 for t in tweet_map.values() if classify_tweet(t) == "Reply"),
-    "Threads": sum(1 for t in tweet_map.values() if classify_tweet(t) == "Thread"),
-    "Retweets": sum(1 for t in tweet_map.values() if classify_tweet(t) == "Retweet"),
-}
+stats = {key: sum(1 for t in tweet_map.values() if classify_tweet(t) == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
 console.print("[bold green]Tweet Processing Summary:[/bold green]")
 for key, value in stats.items():
     console.print(f"{key}: {value}")
