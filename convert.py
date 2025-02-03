@@ -61,12 +61,14 @@ def get_thread_sequence(root_id):
 def classify_tweet(tweet):
     """Classify tweet as Post, Reply, or Thread."""
     text = tweet["full_text"].strip()
+    tweet_id = tweet["id_str"]
+
     if text.startswith("RT @"):
         return "Retweet"
     elif text.startswith("@"):  # Identifies replies
         return "Reply"
     elif tweet["user_id"] == user_id:
-        if any(reply_graph.successors(tweet["id_str"])):
+        if any(reply_graph.successors(tweet_id)) or any(reply_graph.predecessors(tweet_id)):
             return "Thread"
     return "Post"
 
