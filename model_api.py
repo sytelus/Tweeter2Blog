@@ -2,10 +2,10 @@ import requests
 import os
 
 class ModelAPI:
-    def __init__(self):
-        self.api_key = os.getenv("MODEL_API_KEY", "")
-        self.api_endpoint = os.getenv("MODEL_API_ENDPOINT", "")
-        self.model_name = os.getenv("MODEL_NAME", "")
+    def __init__(self, enabled=True):
+        self.api_key = os.getenv("MODEL_API_KEY", "") if enabled else ""
+        self.api_endpoint = os.getenv("MODEL_API_ENDPOINT", "") if enabled else ""
+        self.model_name = os.getenv("MODEL_NAME", "") if enabled else ""
 
         self.headers = {
             "Content-Type": "application/json",
@@ -16,7 +16,7 @@ class ModelAPI:
 
     def send_message(self, message):
         if not self.available:
-            return {"error": "Model API is not available."}
+            return None
 
         payload = {
             "model": self.model_name,

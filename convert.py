@@ -13,6 +13,8 @@ from rich.console import Console
 from rich.progress import track
 from rich.logging import RichHandler
 import networkx as nx
+import aiohttp
+import asyncio
 
 import model_api
 
@@ -308,7 +310,7 @@ def main() -> None:
     mal_formed = 0
     download_failed = 0
 
-    api = model_api.ModelAPI()
+    api = model_api.ModelAPI(enabled=False)
 
     os.makedirs(args.output, exist_ok=True)
     with open(args.input, "r", encoding="utf-8") as f:
