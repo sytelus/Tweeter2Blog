@@ -280,6 +280,9 @@ Do not include anything else in your response.
         if isinstance(response, Mapping):
             if "choices" in response and len(response["choices"])>0 and "message" in response["choices"][0]:
                 message = response["choices"][0]["message"]
+                if 'content' not in message:
+                    log.warning(f"Invalid response from model: {message}")
+                    return frontmatter, slug
                 # separate two lines
                 lines = message["content"].strip().split("\n")
                 # ignore any blank lines
@@ -325,16 +328,16 @@ def tweet_shortcode(tweet_id, user_name):
 async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGraph, tweet_map:Dict[str, Dict], api:ModelAPI, args:argparse.Namespace):
     tweet_type = tweet["type"]
     tweet["mark_down"] = '\n' + tweet['full_text'] + '\n'
-    mal_formed, download_failed = 0, 0
+    mal_formed, download_failed, api_failed = 0, 0, 0
     if tweet_type == "Thread": # club content of a thread
         root_id = find_thread_root(tweet_id, reply_graph)
         if root_id != tweet_id:
-            return mal_formed, download_failed
+            return mal_formed, download_failed, api_failed
         sequence = get_thread_sequence(root_id, tweet_map, reply_graph)
         merged_replacements = {}
         for t in sequence:
             merged_replacements = merge_replacements(merged_replacements, tweet_map[t]["replacements"])
-        thread_text = "\n\n".join([tweet_map[t]["mark_down"] for t in sequence])
+        thread_text = "\n".join([tweet_map[t]["mark_down"].strip() for t in sequence])
         tweet = tweet_map[root_id]
         tweet["mark_down"] = thread_text
         tweet["replacements"] = merged_replacements
@@ -356,10 +359,11 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     storage_name = generate_storage_name(tweet)
 
     frontmatter, slug = await build_frontmatter(session, api, tweet)
-    if frontmatter:
+    if frontmatter and slug:
         tweet["mark_down"] = frontmatter + tweet["mark_down"]
-    if slug:
         storage_name = slug
+    else:
+        api_failed += 1
 
     content_filepath = os.path.join(args.output, tweet["type"], storage_name + ".md")
     if tweet["replacements"]:
@@ -369,14 +373,14 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
                 os.makedirs(content_folder, exist_ok=True)
                 content_filepath = os.path.join(content_folder, "index.md")
                 filepath = await download_image(session, replacement['expanded'], content_folder, replacement["media_filename"])
-                if filepath: # success
+                if filepath: # download success
                     tweet["mark_down"] = tweet['mark_down'].replace(
-                        url, f"\n![{replacement['image_alt']}]({replacement['media_filename']})")
-                else:
+                        url, f"\n\n![{replacement['image_alt']}]({replacement['media_filename']})")
+                else: # download failed
                     download_failed += 1
-                    tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
-            else:
-                tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
+                    tweet["mark_down"] = tweet["mark_down"].replace(url, '<' + replacement["expanded"] + '>') # put URL in <> for markdown
+            else: # not a media file URL
+                tweet["mark_down"] = tweet["mark_down"].replace(url, '<' + replacement["expanded"] + '>') # put URL in <> for markdown
     tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"])
     # markdown doesn't end with a newline, add it
     tweet["mark_down"] = tweet["mark_down"].strip() + '\n'
@@ -386,12 +390,11 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
         f.write(tweet["mark_down"])
     log.info(f"Saved: {content_filepath}")
 
-    return mal_formed, download_failed
+    return mal_formed, download_failed, api_failed
 
 async def main() -> None:
     args = parse_arguments()
-    mal_formed = 0
-    download_failed = 0
+    mal_formed, download_failed, api_failed = 0, 0, 0
 
     api = ModelAPI(enabled=True)
 
@@ -423,9 +426,10 @@ async def main() -> None:
         results = await asyncio.gather(*tasks)
 
     # Process results
-    for mal_formed_, download_failed_ in results:
+    for mal_formed_, download_failed_, api_failed_ in results:
         mal_formed += mal_formed_
         download_failed += download_failed_
+        api_failed += api_failed_
 
 
     stats = {key: sum(1 for t in tweet_map.values() if t["type"] == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
