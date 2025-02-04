@@ -273,7 +273,7 @@ async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
     date_str = date_utc.replace(":", "-").replace("T", "-").split(".")[0].split("+")[0][:-2].replace("-", "")
     frontmatter, slug = None, None
     if api.available:
-        retries = 3
+        retries = 4
         while retries > 0:
             if retries < 2:
                 # sleep for 0.5s
