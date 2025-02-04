@@ -93,24 +93,35 @@ def format_markdown(tweet: Dict) -> str:
     content.append(tweet["full_text"])
     return "".join(content)
 
-def extract_media_id(text):
-    match = re.search(r"https://t\.co/([\w\d]+)$", text)
-    return match.group(1) if match else None
+def extract_twitter_urls(text):
+    # This regular expression will find all occurrences of http://t.co/{id}
+    pattern = r"https://t\.co/[\w\d]+"
 
-def find_media_url(d, id_str):
-    # Check if 'entities' exists in the dictionary
-    if "entities" in d:
-        entities = d["entities"]
+    # Find all non-overlapping matches in the text.
+    matches = re.findall(pattern, text)
+    return matches
 
-        # Check if 'media' exists and is a list of dictionaries
-        if "media" in entities and isinstance(entities["media"], list):
-            for media_dict in entities["media"]:
-                # Check if 'display_url' exists and ends with the given id_str
-                if "display_url" in media_dict and media_dict["display_url"].endswith(id_str):
-                    return media_dict["media_url_https"]
+def build_url_map(tweet_map: Dict[str, Dict]):
+    url_map = {}
+    for tweet in tweet_map.values():
+        content = tweet["full_text"]
+        if "entities" in tweet and "urls" in tweet["entities"]:
+            for url_dict in tweet["entities"]["urls"]:
+                urls = extract_twitter_urls(url_dict["url"])
+                assert len(urls) == 1, f"Expected 1 URL, found {len(urls)} in {url_dict['url']}"
+                url_map[urls[0]] = url_dict["expanded_url"]
+        tweet["url_map"] = url_map
 
-    # Return an empty string if no match is found
-    return ""
+def build_media_map(tweet_map: Dict[str, Dict]):
+    media_map = {}
+    for tweet in tweet_map.values():
+        content = tweet["full_text"]
+        if "entities" in tweet and "media" in tweet["entities"]:
+            for media_dict in tweet["entities"]["media"]:
+                urls = extract_twitter_urls(media_dict["url"])
+                assert len(urls) == 1, f"Expected 1 URL, found {len(urls)} in {media_dict['url']}"
+                media_map[urls[0]] = media_dict["media_url_https"]
+        tweet["media_map"] = media_map
 
 def download_image(url, folder, filename):
     try:
@@ -133,28 +144,67 @@ def download_image(url, folder, filename):
     except Exception as e:
         return e
 
-def detect_media(tweet_map: Dict[str, Dict]) -> None:
+def id_from_url(url):
+    pattern = r"https://[^/]+/([^/]+)"
+    match = re.search(pattern, url)
+    return match.group(1) if match else None
+
+def build_twittr_url_replacements(tweet_map: Dict[str, Dict]) -> None:
     for tweet in tweet_map.values():
-        content = tweet["full_text"]
-        media_id = extract_media_id(content)
+        urls = extract_twitter_urls(tweet["full_text"])
+        replacements = {}
 
-        tweet["media_filename"] = None
-        tweet["image_alt"] = None
-        tweet["media_url"] = None
-        tweet["media_id"] = media_id
-
-        if media_id:
-            media_url = find_media_url(tweet, media_id)
-            ext = os.path.splitext(urlparse(media_url).path)[-1]
-            if media_url:
-                media_filename = f"{media_id}{ext}"
-                image_alt = ""
-                tweet["media_filename"] = media_filename
-                tweet["image_alt"] = image_alt
-                tweet["media_url"] = media_url
+        for url in urls:
+            if url in tweet["url_map"]:
+                replacements[url] = { 'expanded': tweet["url_map"][url] }
+            elif url in tweet["media_map"]:
+                expanded = tweet["media_map"][url]
+                ext = os.path.splitext(urlparse(expanded).path)[-1]
+                id = id_from_url(url)
+                assert id, f"id not found in url {url}"
+                replacements[url] = {
+                    'expanded': expanded,
+                    'media_filename': f'{id}{ext}',
+                    'image_alt': ''
+                }
             else:
-                log.error(f"Media URL not found for {media_id}")
-        # no media for this tweet
+                raise RuntimeError(f"URL not found in media or url map: {url}")
+
+        tweet["replacements"] = replacements
+
+def merge_replacements(dict1, dict2):
+    merged = {}
+
+    # Combine the keys from both dictionaries.
+    all_keys = set(dict1.keys()).union(dict2.keys())
+
+    for key in all_keys:
+        if key in dict1 and key in dict2:
+            cdict1, cdict2, cmerged = dict1[key], dict2[key], {}
+            for ckey in set(cdict1.keys()).union(cdict2.keys()):
+                if ckey in cdict1 and ckey in cdict2:
+                    if cdict1[ckey] != cdict2[ckey]:
+                        raise ValueError(f"Conflict for key '{key}': {cdict1[ckey]} != {cdict2[ckey]}")
+                    cmerged[ckey] = cdict1[ckey]  # or cdict2[ckey] (they are the same)
+            merged[key] = dict1[key]  # or dict2[key] (they are the same)
+        elif key in dict1:
+            merged[key] = dict1[key]
+        else:  # key is only in dict2
+            merged[key] = dict2[key]
+
+    return merged
+
+def replace_twitter_handles(text):
+    # Using (?<!\S) ensures that the character before '@' is not a non-whitespace character,
+    # i.e. it's either the start of the string or a whitespace.
+    pattern = r"(?<!\S)@(\w+)"
+
+    def repl(match):
+        handle = match.group(1)
+        # Replace with markdown formatted link: [handle](https://x.com/handle)
+        return f"[{handle}](https://x.com/{handle})"
+
+    return re.sub(pattern, repl, text)
 
 def main() -> None:
     args = parse_arguments()
@@ -174,33 +224,41 @@ def main() -> None:
 
     build_graph(tweet_map, reply_graph, args.user_id)
     classify_tweets(tweet_map)
-    detect_media(tweet_map)
+    build_url_map(tweet_map)
+    build_media_map(tweet_map)
+    build_twittr_url_replacements(tweet_map)
 
     for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
         tweet_type = tweet["type"]
-        if tweet_type == "Thread":
+        if tweet_type == "Thread": # club content of a thread
             root_id = find_thread_root(tweet_id, reply_graph)
             if root_id != tweet_id:
                 continue
             sequence = get_thread_sequence(root_id, tweet_map, reply_graph)
+            merged_replacements = {}
+            for t in sequence:
+                merged_replacements = merge_replacements(merged_replacements, tweet_map[t]["replacements"])
             thread_text = "\n\n".join([tweet_map[t]["full_text"] for t in sequence])
             tweet = tweet_map[root_id]
             tweet["full_text"] = thread_text
+            tweet["replacements"] = merged_replacements
 
         storage_name = generate_storage_name(tweet)
         content_filepath = os.path.join(args.output, tweet["type"], storage_name + ".md")
-        tweet["mark_down"] = tweet['full_text']
-        if tweet["media_url"]:
-            content_folder = os.path.join(args.output, tweet["type"], storage_name)
-            os.makedirs(content_folder, exist_ok=True)
-            content_filepath = os.path.join(content_folder, "index.md")
-            error = download_image(tweet["media_url"], content_folder, tweet["media_filename"])
-            if error:
-                log.error(f"Error downloading image: {error}")
-            else:
-                tweet["mark_down"] = tweet['full_text'].replace(
-                    f"https://t.co/{tweet['media_id']}",
-                    f"\n\n![{tweet['image_alt']}]({tweet['media_filename']})")
+        tweet["mark_down"] = '\n' + tweet['full_text'] + '\n'
+        if tweet["replacements"]:
+            for url, replacement in tweet["replacements"].items():
+                if replacement.get("media_filename"):
+                    content_folder = os.path.join(args.output, tweet["type"], storage_name)
+                    os.makedirs(content_folder, exist_ok=True)
+                    content_filepath = os.path.join(content_folder, "index.md")
+                    error = download_image(replacement['expanded'], content_folder, replacement["media_filename"])
+                    assert not error, f"Error downloading image: {error}"
+                    tweet["mark_down"] = tweet['mark_down'].replace(
+                        url, f"\n\n![{replacement['image_alt']}]({replacement['media_filename']})")
+                else:
+                    tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
+        tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"])
 
         os.makedirs(os.path.dirname(content_filepath), exist_ok=True)
         with open(content_filepath, "w", encoding="utf-8") as f:
