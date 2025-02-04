@@ -62,9 +62,9 @@ def classify_tweets(tweet_map: Dict[str, Dict]) -> None:
         else:
             tweet["type"] = "Post"
 
-def generate_storage_name(tweet: Dict, prefix: str = "") -> str:
+def generate_storage_name(tweet: Dict) -> str:
     dt_utc = convert_to_utc(tweet["created_at"])
-    return f"{prefix}{dt_utc.strftime('%Y%m%d%H%M')}"
+    return f"{dt_utc.strftime('%Y%m%d%H%M')}"
 
 def build_graph(tweet_map: Dict[str, Dict], reply_graph: nx.DiGraph, user_id:str) -> None:
     for tweet_id, tweet in tweet_map.items():
@@ -95,7 +95,7 @@ def format_markdown(tweet: Dict) -> str:
 
 def extract_media_id(text):
     match = re.search(r"https://t\.co/([\w\d]+)$", text)
-    return match.group(1) if match else ""
+    return match.group(1) if match else None
 
 def find_media_url(d, id_str):
     # Check if 'entities' exists in the dictionary
@@ -133,6 +133,29 @@ def download_image(url, folder, filename):
     except Exception as e:
         return e
 
+def detect_media(tweet_map: Dict[str, Dict]) -> None:
+    for tweet in tweet_map.values():
+        content = tweet["full_text"]
+        media_id = extract_media_id(content)
+
+        tweet["media_filename"] = None
+        tweet["image_alt"] = None
+        tweet["media_url"] = None
+        tweet["media_id"] = media_id
+
+        if media_id:
+            media_url = find_media_url(tweet, media_id)
+            ext = os.path.splitext(urlparse(media_url).path)[-1]
+            if media_url:
+                media_filename = f"{media_id}{ext}"
+                image_alt = ""
+                tweet["media_filename"] = media_filename
+                tweet["image_alt"] = image_alt
+                tweet["media_url"] = media_url
+            else:
+                log.error(f"Media URL not found for {media_id}")
+        # no media for this tweet
+
 def main() -> None:
     args = parse_arguments()
     os.makedirs(args.output, exist_ok=True)
@@ -151,6 +174,8 @@ def main() -> None:
 
     build_graph(tweet_map, reply_graph, args.user_id)
     classify_tweets(tweet_map)
+    detect_media(tweet_map)
+
     for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
         tweet_type = tweet["type"]
         if tweet_type == "Thread":
@@ -162,32 +187,24 @@ def main() -> None:
             tweet = tweet_map[root_id]
             tweet["full_text"] = thread_text
 
-        content = tweet["full_text"]
-        media_id = extract_media_id(content)
         storage_name = generate_storage_name(tweet)
         content_filepath = os.path.join(args.output, tweet["type"], storage_name + ".md")
-        if media_id:
-            media_url = find_media_url(tweet, media_id)
-            # find extention from media url
-            ext = os.path.splitext(urlparse(media_url).path)[-1]
-            if media_url:
-                content_folder = os.path.join(args.output, tweet["type"], storage_name)
-                os.makedirs(content_folder, exist_ok=True)
-                content_filepath = os.path.join(content_folder, "index.md")
-                media_filename = f"{media_id}{ext}"
-                image_alt = ""
-                error = download_image(media_url, content_folder, media_filename)
-                if error:
-                    log.error(f"Error downloading image: {error}")
-                else:
-                    content = content.replace(f"https://t.co/{media_id}", f"\n\n![{image_alt}]({media_filename})")
+        tweet["mark_down"] = tweet['full_text']
+        if tweet["media_url"]:
+            content_folder = os.path.join(args.output, tweet["type"], storage_name)
+            os.makedirs(content_folder, exist_ok=True)
+            content_filepath = os.path.join(content_folder, "index.md")
+            error = download_image(tweet["media_url"], content_folder, tweet["media_filename"])
+            if error:
+                log.error(f"Error downloading image: {error}")
             else:
-                log.error(f"Media URL not found for {media_id}")
+                tweet["mark_down"] = tweet['full_text'].replace(
+                    f"https://t.co/{tweet['media_id']}",
+                    f"\n\n![{tweet['image_alt']}]({tweet['media_filename']})")
 
-        markdown_content = format_markdown(tweet)
         os.makedirs(os.path.dirname(content_filepath), exist_ok=True)
         with open(content_filepath, "w", encoding="utf-8") as f:
-            f.write(content)
+            f.write(tweet["mark_down"])
         log.info(f"Saved: {content_filepath}")
 
     stats = {key: sum(1 for t in tweet_map.values() if t["type"] == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
