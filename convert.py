@@ -95,7 +95,7 @@ def format_markdown(tweet: Dict) -> str:
 
 def extract_twitter_urls(text):
     # This regular expression will find all occurrences of http://t.co/{id}
-    pattern = r"https://t\.co/[\w\d]+"
+    pattern = r"https?://t\.co/[\w\d]+"
 
     # Find all non-overlapping matches in the text.
     matches = re.findall(pattern, text)
@@ -110,19 +110,20 @@ def extract_tweet_info(url):
     #   ([^/?]+)              : Capture group for {id} (one or more characters not '/' or '?')
     #   (?:\?.*)?             : Optionally, a '?' followed by any characters (query parameters)
     #   $                     : End of string
-    pattern = r"^https://x\.com/([^/]+)/status/([^/?]+)(?:\?.*)?$"
+    pattern = r"^https?://x\.com/([^/]+)/status/([^/?]+)(?:\?.*)?$"
 
     match = re.match(pattern, url)
     if match:
         user = match.group(1)
         tweet_id = match.group(2)
+        assert user and tweet_id, f"User and tweet ID not found in URL: {url}"
         return (tweet_id, user)
     return None
 
 
 def build_url_map(tweet_map: Dict[str, Dict]):
-    url_map = {}
     for tweet in tweet_map.values():
+        url_map = {}
         content = tweet["full_text"]
         if "entities" in tweet and "urls" in tweet["entities"]:
             for url_dict in tweet["entities"]["urls"]:
@@ -138,8 +139,8 @@ def build_url_map(tweet_map: Dict[str, Dict]):
         tweet["url_map"] = url_map
 
 def build_media_map(tweet_map: Dict[str, Dict]):
-    media_map = {}
     for tweet in tweet_map.values():
+        media_map = {}
         content = tweet["full_text"]
         if "entities" in tweet and "media" in tweet["entities"]:
             for media_dict in tweet["entities"]["media"]:
@@ -166,14 +167,35 @@ def download_image(url, folder, filename):
             for chunk in response.iter_content(1024):
                 file.write(chunk)
 
-        return None
+        return file_path
+    except requests.exceptions.HTTPError as e:
+        # Check if the HTTP error is a 404 Not Found error
+        if e.response is not None and e.response.status_code == 404:
+            return None
+        else:
+            return e
     except Exception as e:
         return e
 
 def id_from_url(url):
-    pattern = r"https://[^/]+/([^/]+)"
+    pattern = r"https?://[^/]+/([^/]+)"
     match = re.search(pattern, url)
     return match.group(1) if match else None
+
+def get_final_url(url, timeout=10):
+    try:
+        # Using a HEAD request first can be more efficient,
+        # but some servers don't handle HEAD properly so we fall back to GET.
+        response = requests.head(url, allow_redirects=True, timeout=timeout)
+        if response.status_code >= 400:
+            # If the HEAD request fails, fall back to a GET request.
+            response = requests.get(url, allow_redirects=True, timeout=timeout)
+        # response.url is the final URL after redirection
+        return response.url
+    except requests.RequestException as e:
+        # If there's an error, you might want to log or handle it appropriately.
+        # For now, we'll just return the original URL.
+        return url
 
 def build_twittr_url_replacements(tweet_map: Dict[str, Dict]) -> None:
     for tweet in tweet_map.values():
@@ -194,7 +216,8 @@ def build_twittr_url_replacements(tweet_map: Dict[str, Dict]) -> None:
                     'image_alt': ''
                 }
             else:
-                raise RuntimeError(f"URL not found in media or url map: {url}")
+                final_url = get_final_url(url)
+                replacements[url] = { 'expanded': final_url }
 
         tweet["replacements"] = replacements
 
@@ -239,6 +262,9 @@ def tweet_shortcode(tweet_id, user_name):
 
 def main() -> None:
     args = parse_arguments()
+    mal_formed = 0
+    download_failed = 0
+
     os.makedirs(args.output, exist_ok=True)
     with open(args.input, "r", encoding="utf-8") as f:
         tweets_data = json.load(f)
@@ -275,14 +301,18 @@ def main() -> None:
             tweet["full_text"] = thread_text
             tweet["replacements"] = merged_replacements
         elif tweet_type == "Reply": # replace @ with tweet link
-            reply_to_id = tweet["in_reply_to_status_id_str"]
-            reply_to_user_id = tweet["in_reply_to_screen_name"]
-            # get first word which should be the handle
-            parts = tweet['mark_down'].strip().split(maxsplit=1)
-            assert len(parts) == 2, f"First word and then rest of the test expcted: {tweet['mark_down']}"
-            assert parts[0].startswith("@"), f"First word should be a handle: {parts[0]}"
-            response_text = tweet_shortcode(reply_to_id, reply_to_user_id) + '\n\n' + parts[1]
-            tweet["mark_down"] = response_text
+            if 'in_reply_to_screen_name' in tweet and "in_reply_to_status_id_str" in tweet:
+                reply_to_id = tweet["in_reply_to_status_id_str"]
+                reply_to_user_id = tweet["in_reply_to_screen_name"]
+                # get first word which should be the handle
+                parts = tweet['mark_down'].strip().split(maxsplit=1)
+                assert len(parts) == 2, f"First word and then rest of the test expcted: {tweet['mark_down']}"
+                assert parts[0].startswith("@"), f"First word should be a handle: {parts[0]}"
+                response_text = tweet_shortcode(reply_to_id, reply_to_user_id) + '\n\n' + parts[1]
+                tweet["mark_down"] = response_text
+            else:
+                mal_formed += 1
+            # else sometimes this info is missing and we can't do anything
         # else no other processing for other types
 
         storage_name = generate_storage_name(tweet)
@@ -293,10 +323,13 @@ def main() -> None:
                     content_folder = os.path.join(args.output, tweet["type"], storage_name)
                     os.makedirs(content_folder, exist_ok=True)
                     content_filepath = os.path.join(content_folder, "index.md")
-                    error = download_image(replacement['expanded'], content_folder, replacement["media_filename"])
-                    assert not error, f"Error downloading image: {error}"
-                    tweet["mark_down"] = tweet['mark_down'].replace(
-                        url, f"\n\n![{replacement['image_alt']}]({replacement['media_filename']})")
+                    filepath = download_image(replacement['expanded'], content_folder, replacement["media_filename"])
+                    if filepath: # success
+                        tweet["mark_down"] = tweet['mark_down'].replace(
+                            url, f"\n\n![{replacement['image_alt']}]({replacement['media_filename']})")
+                    else:
+                        download_failed += 1
+                        tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
                 else:
                     tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
         tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"])
@@ -311,6 +344,7 @@ def main() -> None:
     console.print("[bold green]Tweet Processing Summary:[/bold green]")
     for key, value in stats.items():
         console.print(f"{key}: {value}")
-
+    log.info(f"Malformed tweet replies: {mal_formed}")
+    log.info(f"Download failed: {download_failed}")
 if __name__ == "__main__":
     main()
