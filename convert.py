@@ -1,3 +1,4 @@
+from typing import Dict, List, Tuple, Mapping
 import os
 import json
 import logging
@@ -12,6 +13,8 @@ from rich.console import Console
 from rich.progress import track
 from rich.logging import RichHandler
 import networkx as nx
+
+import model_api
 
 # Configure logging
 def setup_logging() -> logging.Logger:
@@ -243,6 +246,46 @@ def merge_replacements(dict1, dict2):
 
     return merged
 
+def _create_frontmatter(api, tweet, draft=True):
+    date_utc = convert_to_utc(tweet["created_at"]).isoformat()
+    # format string as YYYY-MM-DD-hhmm
+    date_str = date_utc.replace(":", "-").replace("T", "-").split(".")[0].split("+")[0][:-2].replace("-", "")
+    frontmatter = None
+    if api.available:
+        response = api.send_message(f"""
+                        For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
+                        In the next line, create a short valid file name where this blog post can be saved.
+                        Do not include anything else in your response.
+
+                        {tweet['full_text']}""")
+
+
+        # check if response is mapping type
+        if isinstance(response, Mapping):
+            if "choices" in response and len(response["choices"])>0 and "message" in response["choices"][0]:
+                message = response["choices"][0]["message"]
+                # separate two lines
+                lines = message["content"].strip().split("\n")
+                # ignore any blank lines
+                lines = [line for line in lines if line]
+                if len(lines) >= 2:
+                    title = lines[0]
+                    slug = lines[1]
+                    if slug.endswith(".md"):
+                        slug = slug[:-3]
+                    # format frontmatter as markdown string
+                    frontmatter = f"""---
+title: "{title}"
+draft: {str(draft).lower()}
+date: {date_utc}
+slug: "{date_str + '-' + slug}"
+---
+
+"""
+
+    return frontmatter
+
+
 def replace_twitter_handles(text):
     # Using (?<!\S) ensures that the character before '@' is not a non-whitespace character,
     # i.e. it's either the start of the string or a whitespace.
@@ -264,6 +307,8 @@ def main() -> None:
     args = parse_arguments()
     mal_formed = 0
     download_failed = 0
+
+    api = model_api.ModelAPI()
 
     os.makedirs(args.output, exist_ok=True)
     with open(args.input, "r", encoding="utf-8") as f:
@@ -333,6 +378,10 @@ def main() -> None:
                 else:
                     tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
         tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"])
+
+        frontmatter = _create_frontmatter(api, tweet)
+        if frontmatter:
+            tweet["mark_down"] = frontmatter + tweet["mark_down"]
 
         os.makedirs(os.path.dirname(content_filepath), exist_ok=True)
         with open(content_filepath, "w", encoding="utf-8") as f:
