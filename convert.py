@@ -278,7 +278,7 @@ async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
             if retries < 2:
                 # sleep for 0.5s
                 log.warning(f"Retry {2-retries} to get frontmatter for tweet: {tweet.get('id_str', '<NA>')}")
-                await asyncio.sleep(random.uniform(0.5, 10.0))
+                await asyncio.sleep(random.uniform(2, 20.0))
             retries -= 1
             try:
                 response = await api.send_message(session, f"""For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
@@ -288,7 +288,7 @@ Do not include anything else in your response.
 {tweet['full_text']}""")
             except Exception as e:
                 log.warning(f"Model API request failed: {e}")
-                await asyncio.sleep(random.uniform(0.5, 10.0))
+                await asyncio.sleep(random.uniform(2, 20.0))
                 continue
 
             # check if response is mapping type
