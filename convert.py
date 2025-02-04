@@ -275,7 +275,7 @@ async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
     if api.available:
         retries = 4
         while retries > 0:
-            if retries < 2:
+            if retries < 4:
                 # sleep for 0.5s
                 log.warning(f"Retry {2-retries} to get frontmatter for tweet: {tweet.get('id_str', '<NA>')}")
                 await asyncio.sleep(random.uniform(2, 20.0))
