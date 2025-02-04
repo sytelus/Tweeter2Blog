@@ -18,7 +18,7 @@ import aiohttp
 import asyncio
 
 class ModelAPI:
-    def __init__(self, enabled=True):
+    def __init__(self, enabled=True, max_reqs=20):
         self.api_key = os.getenv("MODEL_API_KEY", "") if enabled else ""
         self.api_endpoint = os.getenv("MODEL_API_ENDPOINT", "") if enabled else ""
         self.model_name = os.getenv("MODEL_NAME", "") if enabled else ""
@@ -29,6 +29,7 @@ class ModelAPI:
         }
 
         self.available = all([self.api_key, self.api_endpoint, self.model_name])
+        self.semaphore = asyncio.Semaphore(max_reqs)
 
     async def send_message(self, session:aiohttp.ClientSession, message):
         if not self.available:
@@ -41,8 +42,9 @@ class ModelAPI:
             ]
         }
 
-        async with session.post(self.api_endpoint, headers=self.headers, json=payload) as response:
-            return await response.json() if response.status == 200 else {"error": await response.text()}
+        async with self.semaphore: # limit max concurrency
+            async with session.post(self.api_endpoint, headers=self.headers, json=payload) as response:
+                return await response.json() if response.status == 200 else {"error": await response.text()}
 
 
 # Configure logging
