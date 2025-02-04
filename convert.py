@@ -62,6 +62,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="Path to the input JSON file")
     parser.add_argument("--output", required=True, help="Path to the output directory")
     parser.add_argument("--user_id", required=True, help="User ID to identify threads")
+    parser.add_argument("--user_name", required=True, help="User name to link to twitter")
     return parser.parse_args()
 
 def convert_to_utc(dt_str: str) -> datetime:
@@ -111,6 +112,9 @@ def build_graph(tweet_map: Dict[str, Dict], reply_graph: nx.DiGraph, user_id:str
                 tweet["is_thread"] = True
                 tweet_map[from_tweet_id]["is_thread"] = True
 
+def post_link(tweet: Dict, args):
+    if 'id_str' in tweet and args.user_name:
+        return f"https://x.com/{args.user_name}/status/{tweet['id_str']}"
 
 def format_markdown(tweet: Dict) -> str:
     content = []
@@ -268,35 +272,38 @@ async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
     date_str = date_utc.replace(":", "-").replace("T", "-").split(".")[0].split("+")[0][:-2].replace("-", "")
     frontmatter, slug = None, None
     if api.available:
-        response = await api.send_message(session, f"""
-For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
+        retries = 2
+        while retries > 0:
+            if retries < 2:
+                log.warning(f"Retry {2-retries} to get frontmatter for tweet: {tweet.get('id_str', '<NA>')}")
+            retries -= 1
+            response = await api.send_message(session, f"""For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
 In the next line, create a short valid file name where this blog post can be saved.
 Do not include anything else in your response.
 
 {tweet['full_text']}""")
 
 
-        # check if response is mapping type
-        if isinstance(response, Mapping):
-            if "choices" in response and len(response["choices"])>0 and "message" in response["choices"][0]:
-                message = response["choices"][0]["message"]
-                if 'content' not in message:
-                    log.warning(f"Invalid response from model: {message}")
-                    return frontmatter, slug
-                # separate two lines
-                lines = message["content"].strip().split("\n")
-                # ignore any blank lines
-                lines = [line for line in lines if line]
-                if len(lines) >= 2:
-                    title = lines[0]
-                    slug = lines[1]
-                    # remove any quotes from slug
-                    slug = slug.replace('"', '')
-                    if slug.endswith(".md"):
-                        slug = slug[:-3]
-                    slug = date_str + '-' + slug
-                    # format frontmatter as markdown string
-                    frontmatter = f"""---
+            # check if response is mapping type
+            if isinstance(response, Mapping):
+                if "choices" in response and len(response["choices"])>0 and "message" in response["choices"][0]:
+                    message = response["choices"][0]["message"]
+                    if 'content' not in message:
+                        continue
+                    # separate two lines
+                    lines = message["content"].strip().split("\n")
+                    # ignore any blank lines
+                    lines = [line for line in lines if line]
+                    if len(lines) >= 2:
+                        title = lines[0].strip()
+                        slug = lines[1].strip()
+                        # remove any quotes from slug
+                        slug = slug.replace('"', '')
+                        if slug.endswith(".md"):
+                            slug = slug[:-3]
+                        slug = date_str + '-' + slug
+                        # format frontmatter as markdown string
+                        frontmatter = f"""---
 title: "{title}"
 draft: {str(draft).lower()}
 date: {date_utc}
@@ -304,6 +311,13 @@ slug: "{slug}"
 ---
 
 """
+                        break # success
+                    else:
+                        continue
+                else:
+                    continue
+            else:
+                continue
 
     return frontmatter, slug
 
@@ -381,7 +395,9 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
                     tweet["mark_down"] = tweet["mark_down"].replace(url, '<' + replacement["expanded"] + '>') # put URL in <> for markdown
             else: # not a media file URL
                 tweet["mark_down"] = tweet["mark_down"].replace(url, '<' + replacement["expanded"] + '>') # put URL in <> for markdown
-    tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"])
+    tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"]).strip()
+    # add post link
+    tweet["mark_down"] += f"\n\n[Discussion]({post_link(tweet, args)})"
     # markdown doesn't end with a newline, add it
     tweet["mark_down"] = tweet["mark_down"].strip() + '\n'
 
