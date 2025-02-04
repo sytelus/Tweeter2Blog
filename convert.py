@@ -1,4 +1,5 @@
 from typing import Dict, List, Tuple, Mapping
+import random
 import os
 import json
 import logging
@@ -276,24 +277,28 @@ async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
         while retries > 0:
             if retries < 2:
                 # sleep for 0.5s
-                await asyncio.sleep(0.5)
                 log.warning(f"Retry {2-retries} to get frontmatter for tweet: {tweet.get('id_str', '<NA>')}")
+                await asyncio.sleep(random.uniform(0.5, 10.0))
             retries -= 1
-            response = await api.send_message(session, f"""For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
+            try:
+                response = await api.send_message(session, f"""For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
 In the next line, create a short valid file name where this blog post can be saved.
 Do not include anything else in your response.
 
 {tweet['full_text']}""")
-
+            except Exception as e:
+                log.warning(f"Model API request failed: {e}")
+                await asyncio.sleep(random.uniform(0.5, 10.0))
+                continue
 
             # check if response is mapping type
             if isinstance(response, Mapping):
                 if "choices" in response and len(response["choices"])>0 and "message" in response["choices"][0]:
-                    message = response["choices"][0]["message"]
+                    message = response["choices"][0]["message"] # type: ignore
                     if 'content' not in message:
                         continue
                     # separate two lines
-                    lines = message["content"].strip().split("\n")
+                    lines = message["content"].strip().split("\n") # type: ignore
                     # ignore any blank lines
                     lines = [line for line in lines if line]
                     if len(lines) >= 2:
@@ -455,10 +460,14 @@ async def main() -> None:
     stats = {key: sum(1 for t in tweet_map.values() if t["type"] == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
     console = Console()
     console.print("[bold green]Tweet Processing Summary:[/bold green]")
+    total = 0
     for key, value in stats.items():
         console.print(f"{key}: {value}")
+        total += value
+    console.print(f"Total tweets: {total}")
     log.info(f"Malformed tweet replies: {mal_formed}")
     log.info(f"Download failed: {download_failed}")
+    log.info(f"API failed: {api_failed}")
 
     end_time = time.perf_counter()
     total_time = end_time - start_time
