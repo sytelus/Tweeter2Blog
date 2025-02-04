@@ -247,6 +247,15 @@ def build_twittr_url_replacements(tweet_map: Dict[str, Dict]) -> None:
 
         tweet["replacements"] = replacements
 
+def sanitize_filename(filename: str) -> str:
+    # Define a regex pattern that matches any illegal character.
+    # Note: The backslash '\' must be escaped.
+    illegal_chars_pattern = r'[<>:"/\\|?*]'
+    sanitized = re.sub(illegal_chars_pattern, "", filename)
+
+    # Optionally, you can also strip leading/trailing whitespace.
+    return sanitized.strip()
+
 def merge_replacements(dict1, dict2):
     merged = {}
 
@@ -307,7 +316,7 @@ Do not include anything else in your response.
                         title = lines[0].strip()
                         slug = lines[1].strip()
                         # remove any quotes from slug
-                        slug = slug.replace('"', '')
+                        slug = sanitize_filename(slug)
                         if slug.endswith(".md"):
                             slug = slug[:-3]
                         slug = date_str + '-' + slug
