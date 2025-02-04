@@ -47,28 +47,37 @@ def get_thread_sequence(root_id: str, tweet_map: Dict[str, Dict], reply_graph: n
     tweets = [(t, convert_to_utc(tweet_map[t]["created_at"])) for t in nx.dfs_preorder_nodes(reply_graph, source=root_id)]
     return [t[0] for t in sorted(tweets, key=lambda x: x[1])]
 
-def classify_tweet(tweet: Dict, user_id: str, reply_graph: nx.DiGraph) -> str:
-    text = tweet["full_text"].strip()
-    tweet_id = tweet["id_str"]
-    if text.startswith("RT @"):
-        return "Retweet"
-    elif text.startswith("@"):
-        return "Reply"
-    elif tweet["user_id"] == user_id:
-        if any(reply_graph.successors(tweet_id)) or any(reply_graph.predecessors(tweet_id)):
-            return "Thread"
-    return "Post"
+def classify_tweets(tweet_map: Dict[str, Dict]) -> None:
+    for tweet in tweet_map.values():
+        text = tweet["full_text"].strip()
+        assert "type" not in tweet
+
+        if tweet.get("is_thread", ""):
+            tweet["type"] = "Thread"
+        elif text.startswith("RT @"):
+            tweet["type"] = "Retweet"
+        elif text.startswith("@"):
+            tweet["type"] = "Reply"
+        else:
+            tweet["type"] = "Post"
 
 def generate_filename(tweet: Dict, prefix: str = "") -> str:
     dt_utc = convert_to_utc(tweet["created_at"])
     return f"{prefix}{dt_utc.strftime('%Y%m%d%H%M')}"
 
-def build_graph(tweet: Dict, tweet_map: Dict[str, Dict], reply_graph: nx.DiGraph) -> None:
-    tweet_id = tweet["id_str"]
-    tweet_map[tweet_id] = tweet
-    reply_graph.add_node(tweet_id, data=tweet)
-    if tweet.get("in_reply_to_status_id_str"):
-        reply_graph.add_edge(tweet["in_reply_to_status_id_str"], tweet_id)
+def build_graph(tweet_map: Dict[str, Dict], reply_graph: nx.DiGraph, user_id:str) -> None:
+    for tweet_id, tweet in tweet_map.items():
+        if not reply_graph.has_node(tweet_id):
+            reply_graph.add_node(tweet_id, data=tweet)
+        from_tweet_id = tweet.get("in_reply_to_status_id_str", "")
+        if from_tweet_id and from_tweet_id in tweet_map:
+            if not reply_graph.has_node(from_tweet_id):
+                reply_graph.add_node(from_tweet_id, data=tweet_map[from_tweet_id])
+            reply_graph.add_edge(from_tweet_id, tweet_id)
+            reply_to_user_id = tweet.get("in_reply_to_user_id")
+            if reply_to_user_id == user_id:
+                tweet["is_thread"] = True
+                tweet_map[from_tweet_id]["is_thread"] = True
 
 def save_markdown(filename: str, content: str, subdir: str, output_dir: str) -> None:
     folder_path = os.path.join(output_dir, subdir)
@@ -95,16 +104,25 @@ def main() -> None:
     os.makedirs(args.output, exist_ok=True)
     with open(args.input, "r", encoding="utf-8") as f:
         tweets_data = json.load(f)
+
     tweet_map: Dict[str, Dict] = {}
     reply_graph = nx.DiGraph()
-    for item in track(tweets_data, description="Processing tweets..."):
+    for item in track(tweets_data, description="Building tweet map..."):
         tweet = item["tweet"]
-        tweet["user_id"] = tweet.get("user", {}).get("id_str", "")
-        build_graph(tweet, tweet_map, reply_graph)
+        tweet_id = tweet["id_str"]
+        assert tweet_id not in tweet_map
+        tweet_map[tweet_id] = tweet
+
+    assert len(tweet_map) == len(tweets_data)
+
+    build_graph(tweet_map, reply_graph, args.user_id)
+    classify_tweets(tweet_map)
     for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
-        tweet_type = classify_tweet(tweet, args.user_id, reply_graph)
+        tweet_type = tweet["type"]
         if tweet_type == "Thread":
             root_id = find_thread_root(tweet_id, reply_graph)
+            if root_id != tweet_id:
+                continue
             sequence = get_thread_sequence(root_id, tweet_map, reply_graph)
             thread_text = "\n\n".join([tweet_map[t]["full_text"] for t in sequence])
             tweet = tweet_map[root_id]
@@ -116,7 +134,7 @@ def main() -> None:
             filename = generate_filename(tweet)
             markdown_content = format_markdown(tweet)
             save_markdown(filename, markdown_content, tweet_type.lower() + "s", args.output)
-    stats = {key: sum(1 for t in tweet_map.values() if classify_tweet(t, args.user_id, reply_graph) == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
+    stats = {key: sum(1 for t in tweet_map.values() if t["type"] == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
     console = Console()
     console.print("[bold green]Tweet Processing Summary:[/bold green]")
     for key, value in stats.items():
