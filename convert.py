@@ -409,6 +409,8 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     return mal_formed, download_failed, api_failed
 
 async def main() -> None:
+    import time
+    start_time = time.perf_counter()
     args = parse_arguments()
     mal_formed, download_failed, api_failed = 0, 0, 0
 
@@ -447,7 +449,6 @@ async def main() -> None:
         download_failed += download_failed_
         api_failed += api_failed_
 
-
     stats = {key: sum(1 for t in tweet_map.values() if t["type"] == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
     console = Console()
     console.print("[bold green]Tweet Processing Summary:[/bold green]")
@@ -455,5 +456,10 @@ async def main() -> None:
         console.print(f"{key}: {value}")
     log.info(f"Malformed tweet replies: {mal_formed}")
     log.info(f"Download failed: {download_failed}")
+
+    end_time = time.perf_counter()
+    total_time = end_time - start_time
+    console.print(f"\nTotal time: {total_time:.2f} seconds")
+
 if __name__ == "__main__":
     asyncio.run(main())
