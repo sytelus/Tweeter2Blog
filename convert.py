@@ -101,6 +101,25 @@ def extract_twitter_urls(text):
     matches = re.findall(pattern, text)
     return matches
 
+
+def extract_tweet_info(url):
+    # Regex breakdown:
+    #   ^https://x\.com/       : URL must start with "https://x.com/"
+    #   ([^/]+)               : Capture group for {user} (one or more characters not '/')
+    #   /status/              : Literal string "/status/"
+    #   ([^/?]+)              : Capture group for {id} (one or more characters not '/' or '?')
+    #   (?:\?.*)?             : Optionally, a '?' followed by any characters (query parameters)
+    #   $                     : End of string
+    pattern = r"^https://x\.com/([^/]+)/status/([^/?]+)(?:\?.*)?$"
+
+    match = re.match(pattern, url)
+    if match:
+        user = match.group(1)
+        tweet_id = match.group(2)
+        return (tweet_id, user)
+    return None
+
+
 def build_url_map(tweet_map: Dict[str, Dict]):
     url_map = {}
     for tweet in tweet_map.values():
@@ -109,7 +128,13 @@ def build_url_map(tweet_map: Dict[str, Dict]):
             for url_dict in tweet["entities"]["urls"]:
                 urls = extract_twitter_urls(url_dict["url"])
                 assert len(urls) == 1, f"Expected 1 URL, found {len(urls)} in {url_dict['url']}"
-                url_map[urls[0]] = url_dict["expanded_url"]
+                expanded = url_dict["expanded_url"]
+                tweet_info = extract_tweet_info(expanded)
+                if tweet_info:
+                    tweet_id, user = tweet_info
+                    url_map[urls[0]] = tweet_shortcode(tweet_id, user)
+                else:
+                    url_map[urls[0]] = expanded
         tweet["url_map"] = url_map
 
 def build_media_map(tweet_map: Dict[str, Dict]):
@@ -120,7 +145,8 @@ def build_media_map(tweet_map: Dict[str, Dict]):
             for media_dict in tweet["entities"]["media"]:
                 urls = extract_twitter_urls(media_dict["url"])
                 assert len(urls) == 1, f"Expected 1 URL, found {len(urls)} in {media_dict['url']}"
-                media_map[urls[0]] = media_dict["media_url_https"]
+                expanded = media_dict["media_url_https"]
+                media_map[urls[0]] = expanded
         tweet["media_map"] = media_map
 
 def download_image(url, folder, filename):
@@ -202,9 +228,14 @@ def replace_twitter_handles(text):
     def repl(match):
         handle = match.group(1)
         # Replace with markdown formatted link: [handle](https://x.com/handle)
-        return f"[{handle}](https://x.com/{handle})"
+        return f"[@{handle}](https://x.com/{handle})"
 
     return re.sub(pattern, repl, text)
+
+def tweet_shortcode(tweet_id, user_name):
+    params = f'user="{user_name}" id="{tweet_id}"'
+    shortcode = '{{< tweet ' + params + ' >}}'
+    return shortcode
 
 def main() -> None:
     args = parse_arguments()
@@ -230,6 +261,7 @@ def main() -> None:
 
     for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
         tweet_type = tweet["type"]
+        tweet["mark_down"] = '\n' + tweet['full_text'] + '\n'
         if tweet_type == "Thread": # club content of a thread
             root_id = find_thread_root(tweet_id, reply_graph)
             if root_id != tweet_id:
@@ -242,10 +274,19 @@ def main() -> None:
             tweet = tweet_map[root_id]
             tweet["full_text"] = thread_text
             tweet["replacements"] = merged_replacements
+        elif tweet_type == "Reply": # replace @ with tweet link
+            reply_to_id = tweet["in_reply_to_status_id_str"]
+            reply_to_user_id = tweet["in_reply_to_screen_name"]
+            # get first word which should be the handle
+            parts = tweet['mark_down'].strip().split(maxsplit=1)
+            assert len(parts) == 2, f"First word and then rest of the test expcted: {tweet['mark_down']}"
+            assert parts[0].startswith("@"), f"First word should be a handle: {parts[0]}"
+            response_text = tweet_shortcode(reply_to_id, reply_to_user_id) + '\n\n' + parts[1]
+            tweet["mark_down"] = response_text
+        # else no other processing for other types
 
         storage_name = generate_storage_name(tweet)
         content_filepath = os.path.join(args.output, tweet["type"], storage_name + ".md")
-        tweet["mark_down"] = '\n' + tweet['full_text'] + '\n'
         if tweet["replacements"]:
             for url, replacement in tweet["replacements"].items():
                 if replacement.get("media_filename"):
