@@ -16,7 +16,36 @@ import networkx as nx
 import aiohttp
 import asyncio
 
-import model_api
+class ModelAPI:
+    def __init__(self, enabled=True):
+        self.api_key = os.getenv("MODEL_API_KEY", "") if enabled else ""
+        self.api_endpoint = os.getenv("MODEL_API_ENDPOINT", "") if enabled else ""
+        self.model_name = os.getenv("MODEL_NAME", "") if enabled else ""
+
+        self.headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+
+        self.available = all([self.api_key, self.api_endpoint, self.model_name])
+
+    def send_message(self, message):
+        if not self.available:
+            return None
+
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "user", "content": message}
+            ]
+        }
+
+        response = requests.post(self.api_endpoint, headers=self.headers, json=payload)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"error": response.text}
 
 # Configure logging
 def setup_logging() -> logging.Logger:
@@ -310,7 +339,7 @@ def main() -> None:
     mal_formed = 0
     download_failed = 0
 
-    api = model_api.ModelAPI(enabled=False)
+    api = ModelAPI(enabled=False)
 
     os.makedirs(args.output, exist_ok=True)
     with open(args.input, "r", encoding="utf-8") as f:
