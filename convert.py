@@ -29,7 +29,7 @@ class ModelAPI:
 
         self.available = all([self.api_key, self.api_endpoint, self.model_name])
 
-    async def send_message(self, session, message):
+    async def send_message(self, session:aiohttp.ClientSession, message):
         if not self.available:
             return None
 
@@ -275,6 +275,8 @@ async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
         retries = 2
         while retries > 0:
             if retries < 2:
+                # sleep for 0.5s
+                await asyncio.sleep(0.5)
                 log.warning(f"Retry {2-retries} to get frontmatter for tweet: {tweet.get('id_str', '<NA>')}")
             retries -= 1
             response = await api.send_message(session, f"""For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
@@ -436,7 +438,8 @@ async def main() -> None:
     build_media_map(tweet_map)
     build_twittr_url_replacements(tweet_map)
 
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=120) #sec
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         tasks = [
             convert_tweet(session, tweet_id, tweet, reply_graph, tweet_map, api, args)
             for tweet_id, tweet in tweet_map.items()
