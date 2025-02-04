@@ -29,7 +29,7 @@ class ModelAPI:
 
         self.available = all([self.api_key, self.api_endpoint, self.model_name])
 
-    def send_message(self, message):
+    async def send_message(self, session, message):
         if not self.available:
             return None
 
@@ -40,12 +40,9 @@ class ModelAPI:
             ]
         }
 
-        response = requests.post(self.api_endpoint, headers=self.headers, json=payload)
+        async with session.post(self.api_endpoint, headers=self.headers, json=payload) as response:
+            return await response.json() if response.status == 200 else {"error": await response.text()}
 
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return {"error": response.text}
 
 # Configure logging
 def setup_logging() -> logging.Logger:
@@ -184,32 +181,20 @@ def build_media_map(tweet_map: Dict[str, Dict]):
                 media_map[urls[0]] = expanded
         tweet["media_map"] = media_map
 
-def download_image(url, folder, filename):
+async def download_image(session, url, folder, filename):
+    os.makedirs(folder, exist_ok=True)
+    file_path = os.path.join(folder, filename)
     try:
-        # Ensure the folder exists
-        os.makedirs(folder, exist_ok=True)
-
-        # Send a GET request to fetch the image
-        response = requests.get(url, stream=True)
-        response.raise_for_status()  # Raise an error for bad responses (4xx and 5xx)
-
-        # Define the full path
-        file_path = os.path.join(folder, filename)
-
-        # Write the image content to the file
-        with open(file_path, "wb") as file:
-            for chunk in response.iter_content(1024):
-                file.write(chunk)
-
+        async with session.get(url) as response:
+            if response.status == 404:
+                return None
+            response.raise_for_status()
+            with open(file_path, "wb") as file:
+                file.write(await response.read())
         return file_path
-    except requests.exceptions.HTTPError as e:
-        # Check if the HTTP error is a 404 Not Found error
-        if e.response is not None and e.response.status_code == 404:
-            return None
-        else:
-            return e
     except Exception as e:
         return e
+
 
 def id_from_url(url):
     pattern = r"https?://[^/]+/([^/]+)"
@@ -277,18 +262,18 @@ def merge_replacements(dict1, dict2):
 
     return merged
 
-def _create_frontmatter(api, tweet, draft=True):
+async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
     date_utc = convert_to_utc(tweet["created_at"]).isoformat()
     # format string as YYYY-MM-DD-hhmm
     date_str = date_utc.replace(":", "-").replace("T", "-").split(".")[0].split("+")[0][:-2].replace("-", "")
-    frontmatter = None
+    frontmatter, slug = None, None
     if api.available:
-        response = api.send_message(f"""
-                        For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
-                        In the next line, create a short valid file name where this blog post can be saved.
-                        Do not include anything else in your response.
+        response = await api.send_message(session, f"""
+For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
+In the next line, create a short valid file name where this blog post can be saved.
+Do not include anything else in your response.
 
-                        {tweet['full_text']}""")
+{tweet['full_text']}""")
 
 
         # check if response is mapping type
@@ -302,19 +287,22 @@ def _create_frontmatter(api, tweet, draft=True):
                 if len(lines) >= 2:
                     title = lines[0]
                     slug = lines[1]
+                    # remove any quotes from slug
+                    slug = slug.replace('"', '')
                     if slug.endswith(".md"):
                         slug = slug[:-3]
+                    slug = date_str + '-' + slug
                     # format frontmatter as markdown string
                     frontmatter = f"""---
 title: "{title}"
 draft: {str(draft).lower()}
 date: {date_utc}
-slug: "{date_str + '-' + slug}"
+slug: "{slug}"
 ---
 
 """
 
-    return frontmatter
+    return frontmatter, slug
 
 
 def replace_twitter_handles(text):
@@ -334,12 +322,78 @@ def tweet_shortcode(tweet_id, user_name):
     shortcode = '{{< tweet ' + params + ' >}}'
     return shortcode
 
-def main() -> None:
+async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGraph, tweet_map:Dict[str, Dict], api:ModelAPI, args:argparse.Namespace):
+    tweet_type = tweet["type"]
+    tweet["mark_down"] = '\n' + tweet['full_text'] + '\n'
+    mal_formed, download_failed = 0, 0
+    if tweet_type == "Thread": # club content of a thread
+        root_id = find_thread_root(tweet_id, reply_graph)
+        if root_id != tweet_id:
+            return mal_formed, download_failed
+        sequence = get_thread_sequence(root_id, tweet_map, reply_graph)
+        merged_replacements = {}
+        for t in sequence:
+            merged_replacements = merge_replacements(merged_replacements, tweet_map[t]["replacements"])
+        thread_text = "\n\n".join([tweet_map[t]["mark_down"] for t in sequence])
+        tweet = tweet_map[root_id]
+        tweet["mark_down"] = thread_text
+        tweet["replacements"] = merged_replacements
+    elif tweet_type == "Reply": # replace @ with tweet link
+        if 'in_reply_to_screen_name' in tweet and "in_reply_to_status_id_str" in tweet:
+            reply_to_id = tweet["in_reply_to_status_id_str"]
+            reply_to_user_id = tweet["in_reply_to_screen_name"]
+            # get first word which should be the handle
+            parts = tweet['mark_down'].strip().split(maxsplit=1)
+            assert len(parts) == 2, f"First word and then rest of the test expcted: {tweet['mark_down']}"
+            assert parts[0].startswith("@"), f"First word should be a handle: {parts[0]}"
+            response_text = tweet_shortcode(reply_to_id, reply_to_user_id) + '\n\n' + parts[1]
+            tweet["mark_down"] = response_text
+        else:
+            mal_formed += 1
+        # else sometimes this info is missing and we can't do anything
+    # else no other processing for other types
+
+    storage_name = generate_storage_name(tweet)
+
+    frontmatter, slug = await build_frontmatter(session, api, tweet)
+    if frontmatter:
+        tweet["mark_down"] = frontmatter + tweet["mark_down"]
+    if slug:
+        storage_name = slug
+
+    content_filepath = os.path.join(args.output, tweet["type"], storage_name + ".md")
+    if tweet["replacements"]:
+        for url, replacement in tweet["replacements"].items():
+            if replacement.get("media_filename"):
+                content_folder = os.path.join(args.output, tweet["type"], storage_name)
+                os.makedirs(content_folder, exist_ok=True)
+                content_filepath = os.path.join(content_folder, "index.md")
+                filepath = await download_image(session, replacement['expanded'], content_folder, replacement["media_filename"])
+                if filepath: # success
+                    tweet["mark_down"] = tweet['mark_down'].replace(
+                        url, f"\n![{replacement['image_alt']}]({replacement['media_filename']})")
+                else:
+                    download_failed += 1
+                    tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
+            else:
+                tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
+    tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"])
+    # markdown doesn't end with a newline, add it
+    tweet["mark_down"] = tweet["mark_down"].strip() + '\n'
+
+    os.makedirs(os.path.dirname(content_filepath), exist_ok=True)
+    with open(content_filepath, "w", encoding="utf-8") as f:
+        f.write(tweet["mark_down"])
+    log.info(f"Saved: {content_filepath}")
+
+    return mal_formed, download_failed
+
+async def main() -> None:
     args = parse_arguments()
     mal_formed = 0
     download_failed = 0
 
-    api = ModelAPI(enabled=False)
+    api = ModelAPI(enabled=True)
 
     os.makedirs(args.output, exist_ok=True)
     with open(args.input, "r", encoding="utf-8") as f:
@@ -361,63 +415,18 @@ def main() -> None:
     build_media_map(tweet_map)
     build_twittr_url_replacements(tweet_map)
 
-    for tweet_id, tweet in track(tweet_map.items(), description="Saving tweets..."):
-        tweet_type = tweet["type"]
-        tweet["mark_down"] = '\n' + tweet['full_text'] + '\n'
-        if tweet_type == "Thread": # club content of a thread
-            root_id = find_thread_root(tweet_id, reply_graph)
-            if root_id != tweet_id:
-                continue
-            sequence = get_thread_sequence(root_id, tweet_map, reply_graph)
-            merged_replacements = {}
-            for t in sequence:
-                merged_replacements = merge_replacements(merged_replacements, tweet_map[t]["replacements"])
-            thread_text = "\n\n".join([tweet_map[t]["full_text"] for t in sequence])
-            tweet = tweet_map[root_id]
-            tweet["full_text"] = thread_text
-            tweet["replacements"] = merged_replacements
-        elif tweet_type == "Reply": # replace @ with tweet link
-            if 'in_reply_to_screen_name' in tweet and "in_reply_to_status_id_str" in tweet:
-                reply_to_id = tweet["in_reply_to_status_id_str"]
-                reply_to_user_id = tweet["in_reply_to_screen_name"]
-                # get first word which should be the handle
-                parts = tweet['mark_down'].strip().split(maxsplit=1)
-                assert len(parts) == 2, f"First word and then rest of the test expcted: {tweet['mark_down']}"
-                assert parts[0].startswith("@"), f"First word should be a handle: {parts[0]}"
-                response_text = tweet_shortcode(reply_to_id, reply_to_user_id) + '\n\n' + parts[1]
-                tweet["mark_down"] = response_text
-            else:
-                mal_formed += 1
-            # else sometimes this info is missing and we can't do anything
-        # else no other processing for other types
+    async with aiohttp.ClientSession() as session:
+        tasks = [
+            convert_tweet(session, tweet_id, tweet, reply_graph, tweet_map, api, args)
+            for tweet_id, tweet in tweet_map.items()
+        ]
+        results = await asyncio.gather(*tasks)
 
-        storage_name = generate_storage_name(tweet)
-        content_filepath = os.path.join(args.output, tweet["type"], storage_name + ".md")
-        if tweet["replacements"]:
-            for url, replacement in tweet["replacements"].items():
-                if replacement.get("media_filename"):
-                    content_folder = os.path.join(args.output, tweet["type"], storage_name)
-                    os.makedirs(content_folder, exist_ok=True)
-                    content_filepath = os.path.join(content_folder, "index.md")
-                    filepath = download_image(replacement['expanded'], content_folder, replacement["media_filename"])
-                    if filepath: # success
-                        tweet["mark_down"] = tweet['mark_down'].replace(
-                            url, f"\n\n![{replacement['image_alt']}]({replacement['media_filename']})")
-                    else:
-                        download_failed += 1
-                        tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
-                else:
-                    tweet["mark_down"] = tweet["mark_down"].replace(url, replacement["expanded"])
-        tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"])
+    # Process results
+    for mal_formed_, download_failed_ in results:
+        mal_formed += mal_formed_
+        download_failed += download_failed_
 
-        frontmatter = _create_frontmatter(api, tweet)
-        if frontmatter:
-            tweet["mark_down"] = frontmatter + tweet["mark_down"]
-
-        os.makedirs(os.path.dirname(content_filepath), exist_ok=True)
-        with open(content_filepath, "w", encoding="utf-8") as f:
-            f.write(tweet["mark_down"])
-        log.info(f"Saved: {content_filepath}")
 
     stats = {key: sum(1 for t in tweet_map.values() if t["type"] == key) for key in ["Post", "Reply", "Thread", "Retweet"]}
     console = Console()
@@ -427,4 +436,4 @@ def main() -> None:
     log.info(f"Malformed tweet replies: {mal_formed}")
     log.info(f"Download failed: {download_failed}")
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
