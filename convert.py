@@ -398,7 +398,7 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
             retries -= 1
             # make sure tweet content is not longer than ~10k characters so it fits in context
             tweet_content = tweet["full_text"][:10000]
-            if len(tweet_content) > MIN_TWEET_LENGTH:
+            if len(tweet_content) > MIN_TWEET_LENGTH and len(tweet_content.split()) > 1:
                 try:
                     prompt = (
                         "For below tweet, create a very short creatively funny but clever and informative title "
