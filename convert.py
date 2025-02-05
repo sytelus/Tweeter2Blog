@@ -334,9 +334,9 @@ def merge_replacements(dict1, dict2):
 
     return merged
 
-def sanitize_yaml_line(value):
+def sanitize_yaml_line(value, for_quoting_inside="'"):
     # Dump using PyYAML's safe representation
-    safe_value = yaml.dump(value, allow_unicode=True, default_style="'", width=float('inf'))
+    safe_value = yaml.dump(value, allow_unicode=True, default_style=for_quoting_inside, width=float('inf'))
 
     # dump function is pretty bad and randomly adds "\n...\n", quotes, front separator etc
 
@@ -393,37 +393,46 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
                 # Sleep for a random interval between 2 and 30 seconds.
                 await asyncio.sleep(random.uniform(2, 30.0))
             retries -= 1
+            # make sure tweet content is not longer than ~10k characters so it fits in context
+            tweet_content = tweet["full_text"][:10000]
+            if len(tweet_content) > 80:
+                try:
+                    prompt = (
+                        "For below tweet, create a very short creatively funny but clever and informative title "
+                        "for the frontmatter to be used in blog and return it in the first line.\n"
+                        "In the next line, create a short valid file name where this blog post can be saved.\n"
+                        "Do not include anything else in your response.\n\n"
+                        f"{tweet_content}"
+                    )
+                    response = await api.send_message(session, prompt)
+                except Exception as e:
+                    log.warning(f"Model API request failed: {e}")
+                    await asyncio.sleep(random.uniform(2, 30.0))
+                    continue
 
-            try:
-                prompt = (
-                    "For below tweet, create a very short creatively funny but clever and informative title "
-                    "for the frontmatter to be used in blog and return it in the first line.\n"
-                    "In the next line, create a short valid file name where this blog post can be saved.\n"
-                    "Do not include anything else in your response.\n\n"
-                    f"{tweet['full_text']}"
-                )
-                response = await api.send_message(session, prompt)
-            except Exception as e:
-                log.warning(f"Model API request failed: {e}")
-                await asyncio.sleep(random.uniform(2, 30.0))
-                continue
+                # Process the API response if it is a mapping.
+                if not isinstance(response, Mapping):
+                    continue
 
-            # Process the API response if it is a mapping.
-            if not isinstance(response, Mapping):
-                continue
+                choices = response.get("choices")
+                if not choices or not isinstance(choices, list):
+                    continue
 
-            choices = response.get("choices")
-            if not choices or not isinstance(choices, list):
-                continue
+                message = choices[0].get("message")
+                if not message or "content" not in message:
+                    continue
 
-            message = choices[0].get("message")
-            if not message or "content" not in message:
-                continue
+                # Split the message content into non-empty lines.
+                lines = [line.strip() for line in message["content"].split("\n") if line.strip()]
+                if len(lines) < 2:
+                    continue
 
-            # Split the message content into non-empty lines.
-            lines = [line.strip() for line in message["content"].split("\n") if line.strip()]
-            if len(lines) < 2:
-                continue
+                draft = is_draft(tweet, args.draft_before_date)
+            else:
+                # replace new lines with space
+                tweet_content = tweet_content.replace("\n", " ") or "No content"
+                lines = [tweet_content, tweet_content]
+                draft = True
 
             # Process title.
             title = lines[0].replace('"', "'").strip()
@@ -433,7 +442,7 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
                 title = title[1:-1].strip()
             if len(title) < 3:
                 continue
-            title = sanitize_yaml_line(title)
+            title = sanitize_yaml_line(title, for_quoting_inside="'")
 
             # Process slug.
             raw_slug = lines[1].strip()
@@ -441,9 +450,7 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
             # remove everything after . if . exist
             slug = slug.split(".")[0]
             slug = generate_storage_name(tweet) + '-' + slug
-            slug = sanitize_yaml_line(slug)
-
-            draft = is_draft(tweet, args.draft_before_date)
+            slug = sanitize_yaml_line(slug, for_quoting_inside="'")
 
             # Build the frontmatter markdown string.
             frontmatter = (
@@ -452,7 +459,7 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
                 f"draft: {str(draft).lower()}\n"
                 # https://gohugo.io/content-management/front-matter/#dates
                 f"date: {convert_to_utc(tweet['created_at']).isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
-                f'slug: "{slug}"\n'
+                f"slug: '{slug}'\n"
                 f'is_tweet: true\n'
                 f'tweet_info:\n'
                 f'  id: "{tweet["id_str"]}"\n'
