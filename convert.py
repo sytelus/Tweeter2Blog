@@ -16,6 +16,7 @@ from rich.logging import RichHandler
 import networkx as nx
 import aiohttp
 import asyncio
+import yaml
 
 class ModelAPI:
     def __init__(self, enabled=True, max_reqs=20):
@@ -278,82 +279,117 @@ def merge_replacements(dict1, dict2):
 
     return merged
 
-def sanitize_yaml_string(value):
+def sanitize_yaml_line(value):
     # Dump using PyYAML's safe representation
-    safe_value = yaml.safe_dump(value, default_style=None).strip()
+    safe_value = yaml.dump(value, allow_unicode=True, default_style='', width=float('inf'))
+
+    # dump function is pretty bad and randomly adds "\n...\n", quotes, front separator etc
+
+    if safe_value.startswith("-"):
+        safe_value = safe_value.lstrip("-")
+    safe_value = safe_value.strip()
+    safe_value = safe_value.rstrip(".")
+    safe_value = safe_value.strip()
 
     return safe_value
 
-async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
+async def build_frontmatter(session, api: ModelAPI, tweet, draft=True):
+    """
+    Build the markdown frontmatter for a tweet blog post.
+
+    Parameters:
+        session: The HTTP session to be used for API requests.
+        api (ModelAPI): An instance of ModelAPI to generate title and slug.
+        tweet (dict): The tweet data.
+        draft (bool): Whether the post is a draft.
+
+    Returns:
+        A tuple (frontmatter, slug) where frontmatter is the markdown string,
+        and slug is the generated slug.
+    """
+    # Convert tweet creation time to UTC and generate a formatted date string.
     date_utc = convert_to_utc(tweet["created_at"]).isoformat()
-    # format string as YYYY-MM-DD-hhmm
-    date_str = date_utc.replace(":", "-").replace("T", "-").split(".")[0].split("+")[0][:-2].replace("-", "")
+    # Format string as YYYYMMDDhhmm by removing punctuation.
+    date_str = (
+        date_utc.replace(":", "-")
+                .replace("T", "-")
+                .split(".")[0]
+                .split("+")[0][:-2]
+                .replace("-", "")
+    )
+
     frontmatter, slug = None, None
+
     if api.available:
         retries = 5
         while retries > 0:
             if retries < 5:
-                # sleep for 0.5s
-                log.warning(f"Retry {2-retries} to get frontmatter for tweet: {tweet.get('id_str', '<NA>')}")
+                log.warning(
+                    f"Retry {5 - retries} to get frontmatter for tweet: {tweet.get('id_str', '<NA>')}"
+                )
+                # Sleep for a random interval between 2 and 30 seconds.
                 await asyncio.sleep(random.uniform(2, 30.0))
             retries -= 1
-            try:
-                response = await api.send_message(session, f"""For below tweet, create a very short creatively funny but clever and informative title for the frontmatter to be used in blog and return it in the first line.
-In the next line, create a short valid file name where this blog post can be saved.
-Do not include anything else in your response.
 
-{tweet['full_text']}""")
+            try:
+                prompt = (
+                    "For below tweet, create a very short creatively funny but clever and informative title "
+                    "for the frontmatter to be used in blog and return it in the first line.\n"
+                    "In the next line, create a short valid file name where this blog post can be saved.\n"
+                    "Do not include anything else in your response.\n\n"
+                    f"{tweet['full_text']}"
+                )
+                response = await api.send_message(session, prompt)
             except Exception as e:
                 log.warning(f"Model API request failed: {e}")
                 await asyncio.sleep(random.uniform(2, 30.0))
                 continue
 
-            # check if response is mapping type
-            if isinstance(response, Mapping):
-                if "choices" in response and len(response["choices"])>0 and "message" in response["choices"][0]:
-                    message = response["choices"][0]["message"] # type: ignore
-                    if 'content' not in message:
-                        continue
-                    # separate two lines
-                    lines = message["content"].strip().split("\n") # type: ignore
-                    # ignore any blank lines
-                    lines = [line for line in lines if line]
-                    if len(lines) >= 2:
-                        # cleanup title
-                        title = lines[0].replace("\"", "'").strip()
-                        if len(title) < 3:
-                            continue
-                        if title[0] == "'" and title[-1] == "'":
-                            title = title[1:-1]
-                        if len(title) < 3:
-                            continue
-                        title = sanitize_yaml_string(title)
-
-                        # cleanup slug
-                        slug = lines[1].strip()
-                        # remove any quotes from slug
-                        slug = sanitize_filename(slug)
-                        if slug.endswith(".md"):
-                            slug = slug[:-3]
-                        slug = date_str + '-' + slug
-                        slug = sanitize_yaml_string(slug)
-
-                        # format frontmatter as markdown string
-                        frontmatter = f"""---
-title: "{title}"
-draft: {str(draft).lower()}
-date: {date_utc}
-slug: "{slug}"
----
-
-"""
-                        break # success
-                    else:
-                        continue
-                else:
-                    continue
-            else:
+            # Process the API response if it is a mapping.
+            if not isinstance(response, Mapping):
                 continue
+
+            choices = response.get("choices")
+            if not choices or not isinstance(choices, list):
+                continue
+
+            message = choices[0].get("message")
+            if not message or "content" not in message:
+                continue
+
+            # Split the message content into non-empty lines.
+            lines = [line.strip() for line in message["content"].split("\n") if line.strip()]
+            if len(lines) < 2:
+                continue
+
+            # Process title.
+            title = lines[0].replace('"', "'").strip()
+            if len(title) < 3:
+                continue
+            if title.startswith("'") and title.endswith("'"):
+                title = title[1:-1].strip()
+            if len(title) < 3:
+                continue
+            title = sanitize_yaml_line(title)
+
+            # Process slug.
+            raw_slug = lines[1].strip()
+            slug = sanitize_filename(raw_slug)
+            if slug.endswith(".md"):
+                slug = slug[:-3]
+            slug = date_str + '-' + slug
+            slug = sanitize_yaml_line(slug)
+
+            # Build the frontmatter markdown string.
+            frontmatter = (
+                f"---\n"
+                f'title: "{title}"\n'
+                f"draft: {str(draft).lower()}\n"
+                f"date: {date_utc}\n"
+                f'slug: "{slug}"\n'
+                f"---\n\n"
+            )
+            break  # Success; exit the retry loop.
 
     return frontmatter, slug
 

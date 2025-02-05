@@ -10,7 +10,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "convert.py",
-            "args": ["--input", "D:\\GitHubSrc\\Tweeter2Blog\\sample.json", "--output", "D:\\temp\\tweet_posts", "--user_id", "7637292"],
+            "args": ["--input", "D:\\GitHubSrc\\Tweeter2Blog\\sample.json", "--output", "D:\\temp\\tweet_posts", "--user_id", "7637292", "--user_name", "sytelus"],
             "console": "integratedTerminal"
         }
     ]
