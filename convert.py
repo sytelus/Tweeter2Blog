@@ -539,13 +539,20 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
         if 'in_reply_to_screen_name' in tweet and "in_reply_to_status_id_str" in tweet:
             reply_to_id = tweet["in_reply_to_status_id_str"]
             reply_to_user_id = tweet["in_reply_to_screen_name"]
-            # get first word which should be the handle
-            parts = tweet['mark_down'].strip().split(maxsplit=1)
-            assert len(parts) == 2, f"First word and then rest of the test expcted: {tweet['mark_down']}"
-            assert parts[0].startswith("@"), f"First word should be a handle: {parts[0]}"
 
-            # "To" tweet using shortcode
-            response_text = tweet_shortcode(reply_to_id, reply_to_user_id) + '\n\n' + parts[1]
+            reply_tweet_shortcode = tweet_shortcode(reply_to_id, reply_to_user_id)
+
+            # replace @xyz at start with tweet shortcode
+            if tweet["full_text"].startswith("@"):
+                # get first word which should be the handle
+                parts = tweet['mark_down'].strip().split(maxsplit=1) # extract @xyz as first part
+                assert len(parts) == 2, f"First word and then rest of the test expcted: {tweet['mark_down']}"
+                assert parts[0].startswith("@"), f"First word should be a handle: {parts[0]}, {tweet['mark_down']}"
+
+                # "To" tweet using shortcode
+                response_text = reply_tweet_shortcode + '\n\n' + parts[1]
+            else:
+                response_text = reply_tweet_shortcode + '\n\n' + tweet['mark_down']
             tweet["mark_down"] = response_text
         else:
             mal_formed += 1
