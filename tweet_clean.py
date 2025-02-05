@@ -24,7 +24,7 @@ def parse_text(text: str):
     #
     # We use re.DOTALL so that '.' matches newline characters as well.
     pattern = re.compile(
-        r'^(?P<prefix>.*?)\.\.\.\s+(?P<urls>(?:https?://\S+(?:\s+|$))*)$',
+        r'^(?P<prefix>.*?)\.\.\.(?:$|\s+(?P<urls>(?:https?://\S+(?:\s+|$))*)$)',
         re.DOTALL
     )
     match = pattern.fullmatch(text)
@@ -42,6 +42,7 @@ def main():
     # Some test cases including edge cases:
     test_cases = [
         # 1. Simple case with one URL.
+        "abc..",
         "This is a \n\nsimple test...\n http://example.com",
         "This is a \n\nsimple test... http://example.com",
         "This is a ...simple test...\n http://example.com",

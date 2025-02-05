@@ -205,8 +205,8 @@ def extract_tweet_info(url):
 
     match = re.match(pattern, url)
     if match:
-        user = match.group(1)
-        tweet_id = match.group(2)
+        user = match.group(2)
+        tweet_id = match.group(3)
         assert user and tweet_id, f"User and tweet ID not found in URL: {url}"
         return (tweet_id, user)
     return None
@@ -221,12 +221,13 @@ def build_url_map(tweet_map: Dict[str, Dict]):
                 urls = extract_twitter_urls(url_dict["url"])
                 assert len(urls) == 1, f"Expected 1 URL, found {len(urls)} in {url_dict['url']}"
                 expanded = url_dict["expanded_url"]
-                tweet_info = extract_tweet_info(expanded)
-                if tweet_info:
-                    tweet_id, user = tweet_info
-                    url_map[urls[0]] = tweet_shortcode(tweet_id, user)
-                else:
-                    url_map[urls[0]] = expanded
+                # let's not replace every twitter link with shortcode for now because quoted tweets have it end  and shouldn't be replaced
+                # tweet_info = extract_tweet_info(expanded)
+                # if tweet_info:
+                #     tweet_id, user = tweet_info
+                #     url_map[urls[0]] = tweet_shortcode(tweet_id, user)
+                # else:
+                url_map[urls[0]] = expanded
         tweet["url_map"] = url_map
 
 def build_media_map(tweet_map: Dict[str, Dict]):
@@ -551,7 +552,7 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     # For retweets and quoted tweets, twitter truncates and ends with ... followed by URLs, first being the original tweet and rest being media
     is_pattern_found, prefix, urls = parse_triple_dot_endings(tweet["mark_down"])
     if is_pattern_found and prefix:
-        tweet["mark_down"] = prefix + '... ' + '[Continue reading](urls[0])'
+        tweet["mark_down"] = prefix + '...' + ' [continue reading](urls[0])'
         for url in urls[1:]:
             tweet["mark_down"] += f"\n\n{url}"
 
@@ -587,7 +588,7 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     # check if _index.md exists, if not then create default index.md
     if not os.path.exists(os.path.join(base_folder, "_index.md")):
         with open(os.path.join(base_folder, "_index.md"), "w", encoding="utf-8") as f:
-            f.write(f"---\ntitle: {tweet['type']}\n---\n\n")
+            f.write(f"---\ntitle: Twitter {tweet['type']}\n---\n\n")
 
     # assume default as md file but we will change it to folder if tweet has media
     content_filepath = os.path.join(base_folder, storage_name + ".md")
@@ -611,11 +612,18 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
                 tweet["mark_down"] = tweet["mark_down"].replace(url, f'<{expanded_url}>') # put URL in <> for markdown
                 # if URL was already in markdown, i.e., inside [...]() then remove <> that we just added
                 tweet["mark_down"] = tweet["mark_down"].replace(f'](<{expanded_url}>)', f']({expanded_url})')
+                # also fix shortcodes
+                tweet["mark_down"] = tweet["mark_down"].replace(f'<{{< {expanded_url} >}}>', f'{{< {expanded_url} >}}')
                 tweet["mark_down"] = youtube_to_shortcode(tweet["mark_down"])
     # turn twitter handles into markdown links
     tweet["mark_down"] = twitter_handles_to_links(tweet["mark_down"]).strip()
+
     # add post link
-    tweet["mark_down"] += f"\n\n[Discussion]({post_link(tweet, args)})"
+    if tweet["mark_down"].endswith("..."):
+        tweet["mark_down"] += " [continue reading]({post_link(tweet, args)})"
+    else:
+        tweet["mark_down"] += f"\n\n[Discussion]({post_link(tweet, args)})"
+
     # markdown doesn't end with a newline, add it
     tweet["mark_down"] = tweet["mark_down"].strip() + '\n'
 
