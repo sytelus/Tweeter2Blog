@@ -18,6 +18,9 @@ import aiohttp
 import asyncio
 import yaml
 
+
+MIN_TWEET_LENGTH = 80 # below this length we will not use model API
+
 class ModelAPI:
     def __init__(self, enabled=True, max_reqs=20):
         self.api_key = os.getenv("MODEL_API_KEY", "") if enabled else ""
@@ -395,7 +398,7 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
             retries -= 1
             # make sure tweet content is not longer than ~10k characters so it fits in context
             tweet_content = tweet["full_text"][:10000]
-            if len(tweet_content) > 80:
+            if len(tweet_content) > MIN_TWEET_LENGTH:
                 try:
                     prompt = (
                         "For below tweet, create a very short creatively funny but clever and informative title "
@@ -588,10 +591,15 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
         slug = storage_name
         frontmatter = (
             f"---\n"
-            f'title: "{create_date.isoformat()}"\n'
+            f'title: "Tweet on {create_date.isoformat()}"\n'
             f"draft: true\n"
             f"date: {create_date.isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
             f'slug: "{slug}"\n'
+            f'is_tweet: true\n'
+            f'tweet_info:\n'
+            f'  id: "{tweet["id_str"]}"\n'
+            f'  type: "{tweet["type"].lower()}"\n'
+            f'  is_thread: {tweet.get("is_thread", False)}\n'
             f"---\n\n"
         )
     tweet["mark_down"] = frontmatter + '\n\n' + tweet["mark_down"]
