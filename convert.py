@@ -6,7 +6,7 @@ import logging
 import argparse
 import requests
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone
 from collections import defaultdict
 from typing import Dict, List, Tuple
@@ -195,13 +195,13 @@ def extract_twitter_urls(text):
 
 def extract_tweet_info(url):
     # Regex breakdown:
-    #   ^https://x\.com/       : URL must start with "https://x.com/"
+    #   ^https://(x|twitter)\.com/       : URL must be x.com or twitter.com
     #   ([^/]+)               : Capture group for {user} (one or more characters not '/')
     #   /status/              : Literal string "/status/"
     #   ([^/?]+)              : Capture group for {id} (one or more characters not '/' or '?')
     #   (?:\?.*)?             : Optionally, a '?' followed by any characters (query parameters)
     #   $                     : End of string
-    pattern = r"^https?://x\.com/([^/]+)/status/([^/?]+)(?:\?.*)?$"
+    pattern = r"^https?://(x|twitter)\.com/([^/]+)/status/([^/?]+)(?:\?.*)?$"
 
     match = re.match(pattern, url)
     if match:
@@ -442,8 +442,9 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
             # Build the frontmatter markdown string.
             frontmatter = (
                 f"---\n"
-                f'title: "{title}"\n'
+                f"title: '{title}'\n"
                 f"draft: {str(draft).lower()}\n"
+                # https://gohugo.io/content-management/front-matter/#dates
                 f"date: {convert_to_utc(tweet['created_at']).isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
                 f'slug: "{slug}"\n'
                 f"---\n\n"
@@ -469,6 +470,39 @@ def tweet_shortcode(tweet_id, user_name):
     params = f'user="{user_name}" id="{tweet_id}"'
     shortcode = '{{< tweet ' + params + ' >}}'
     return shortcode
+
+def youtube_to_shortcode(text: str) -> str:
+    # This pattern matches any substring that starts with < and ends with >
+    pattern = r'<([^>]+)>'
+
+    def replace(match):
+        url = match.group(1)
+        parsed = urlparse(url)
+        video_id = None
+        host = parsed.netloc.lower()
+
+        # Check for standard YouTube URLs like "youtube.com/watch?v=VIDEO_ID"
+        if 'youtube.com' in host:
+            if parsed.path == '/watch':
+                qs = parse_qs(parsed.query)
+                if 'v' in qs:
+                    video_id = qs['v'][0]
+            # Also support URLs like "youtube.com/embed/VIDEO_ID"
+            elif parsed.path.startswith('/embed/'):
+                video_id = parsed.path.split('/embed/')[1]
+
+        # Check for short YouTube URLs like "youtu.be/VIDEO_ID"
+        elif 'youtu.be' in host:
+            # The video id is the first element of the path (after removing any leading '/')
+            video_id = parsed.path.lstrip('/')
+
+        # If we found a video id, return the shortcode; otherwise return the original match.
+        if video_id:
+            return "{{< youtube {" + video_id + "} >}}"
+        else:
+            return match.group(0)
+
+    return re.sub(pattern, replace, text)
 
 async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGraph, tweet_map:Dict[str, Dict], api:ModelAPI, args:argparse.Namespace):
     tweet_type = tweet["type"]
@@ -522,10 +556,20 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     # get frontmatter and slug (slug will replace storage_name)
     frontmatter, slug = await build_frontmatter(session, api, tweet, args)
     if frontmatter and slug:
-        tweet["mark_down"] = frontmatter + '\n\n' + tweet["mark_down"]
         storage_name = slug
     else:
         api_failed += 1
+        create_date = convert_to_utc(tweet['created_at'])
+        slug = storage_name
+        frontmatter = (
+            f"---\n"
+            f'title: "{create_date.isoformat()}"\n'
+            f"draft: true\n"
+            f"date: {create_date.isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
+            f'slug: "{slug}"\n'
+            f"---\n\n"
+        )
+    tweet["mark_down"] = frontmatter + '\n\n' + tweet["mark_down"]
 
     # now we will replace the followings:
     # 1. twitter handles with markdown links
@@ -534,6 +578,12 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     # first assert that storage name doesn't have any bad characters including . or new line
     assert not re.search(r'[<>:"/\\|?*\.\n]', storage_name), f"Storage name has bad characters: {storage_name}"
     base_folder = os.path.join(args.output, tweet["type"].lower())
+    os.makedirs(base_folder, exist_ok=True)
+    # check if _index.md exists, if not then create default index.md
+    if not os.path.exists(os.path.join(base_folder, "_index.md")):
+        with open(os.path.join(base_folder, "_index.md"), "w", encoding="utf-8") as f:
+            f.write(f"---\ntitle: tweet['type']\n---\n\n")
+
     # assume default as md file but we will change it to folder if tweet has media
     content_filepath = os.path.join(base_folder, storage_name + ".md")
     if tweet["replacements"]:
@@ -556,6 +606,7 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
                 tweet["mark_down"] = tweet["mark_down"].replace(url, f'<{expanded_url}>') # put URL in <> for markdown
                 # if URL was already in markdown, i.e., inside [...]() then remove <> that we just added
                 tweet["mark_down"] = tweet["mark_down"].replace(f'](<{expanded_url}>)', f']({expanded_url})')
+                tweet["mark_down"] = youtube_to_shortcode(tweet["mark_down"])
     # turn twitter handles into markdown links
     tweet["mark_down"] = twitter_handles_to_links(tweet["mark_down"]).strip()
     # add post link
