@@ -334,12 +334,15 @@ def merge_replacements(dict1, dict2):
 
 def sanitize_yaml_line(value):
     # Dump using PyYAML's safe representation
-    safe_value = yaml.dump(value, allow_unicode=True, default_style='', width=float('inf'))
+    safe_value = yaml.dump(value, allow_unicode=True, default_style=None, width=float('inf'))
 
     # dump function is pretty bad and randomly adds "\n...\n", quotes, front separator etc
 
-    if safe_value.startswith("-"):
-        safe_value = safe_value.lstrip("-")
+    safe_value = safe_value.lstrip("'")
+    safe_value = safe_value.strip()
+    safe_value = safe_value.rstrip("'")
+    safe_value = safe_value.strip()
+    safe_value = safe_value.lstrip("-")
     safe_value = safe_value.strip()
     safe_value = safe_value.rstrip(".")
     safe_value = safe_value.strip()
@@ -619,8 +622,8 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     tweet["mark_down"] = twitter_handles_to_links(tweet["mark_down"]).strip()
 
     # add post link
-    if tweet["mark_down"].endswith("..."):
-        tweet["mark_down"] += " [continue reading]({post_link(tweet, args)})"
+    if tweet["mark_down"].endswith("...") or tweet["mark_down"].endswith("…"):
+        tweet["mark_down"] += f" [continue reading]({post_link(tweet, args)})"
     else:
         tweet["mark_down"] += f"\n\n[Discussion]({post_link(tweet, args)})"
 
