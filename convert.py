@@ -447,6 +447,11 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
                 # https://gohugo.io/content-management/front-matter/#dates
                 f"date: {convert_to_utc(tweet['created_at']).isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
                 f'slug: "{slug}"\n'
+                f'is_tweet: true\n'
+                f'tweet_info:\n'
+                f'  id: "{tweet["id_str"]}"\n'
+                f'  type: "{tweet["type"].lower()}"\n'
+                f'  is_thread: {tweet.get("is_thread", False)}\n'
                 f"---\n\n"
             )
             break  # Success; exit the retry loop.
@@ -582,7 +587,7 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     # check if _index.md exists, if not then create default index.md
     if not os.path.exists(os.path.join(base_folder, "_index.md")):
         with open(os.path.join(base_folder, "_index.md"), "w", encoding="utf-8") as f:
-            f.write(f"---\ntitle: tweet['type']\n---\n\n")
+            f.write(f"---\ntitle: {tweet['type']}\n---\n\n")
 
     # assume default as md file but we will change it to folder if tweet has media
     content_filepath = os.path.join(base_folder, storage_name + ".md")
