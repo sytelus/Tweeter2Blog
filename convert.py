@@ -278,6 +278,12 @@ def merge_replacements(dict1, dict2):
 
     return merged
 
+def sanitize_yaml_string(value):
+    # Dump using PyYAML's safe representation
+    safe_value = yaml.safe_dump(value, default_style=None).strip()
+
+    return safe_value
+
 async def build_frontmatter(session, api:ModelAPI, tweet, draft=True):
     date_utc = convert_to_utc(tweet["created_at"]).isoformat()
     # format string as YYYY-MM-DD-hhmm
@@ -313,13 +319,25 @@ Do not include anything else in your response.
                     # ignore any blank lines
                     lines = [line for line in lines if line]
                     if len(lines) >= 2:
-                        title = lines[0].strip()
+                        # cleanup title
+                        title = lines[0].replace("\"", "'").strip()
+                        if len(title) < 3:
+                            continue
+                        if title[0] == "'" and title[-1] == "'":
+                            title = title[1:-1]
+                        if len(title) < 3:
+                            continue
+                        title = sanitize_yaml_string(title)
+
+                        # cleanup slug
                         slug = lines[1].strip()
                         # remove any quotes from slug
                         slug = sanitize_filename(slug)
                         if slug.endswith(".md"):
                             slug = slug[:-3]
                         slug = date_str + '-' + slug
+                        slug = sanitize_yaml_string(slug)
+
                         # format frontmatter as markdown string
                         frontmatter = f"""---
 title: "{title}"
@@ -397,7 +415,7 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     else:
         api_failed += 1
 
-    content_filepath = os.path.join(args.output, tweet["type"], storage_name + ".md")
+    content_filepath = os.path.join(args.output, tweet["type"].lower(), storage_name + ".md")
     if tweet["replacements"]:
         for url, replacement in tweet["replacements"].items():
             if replacement.get("media_filename"):
