@@ -436,8 +436,8 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
             # Process slug.
             raw_slug = lines[1].strip()
             slug = sanitize_filename(raw_slug)
-            if slug.endswith(".md"):
-                slug = slug[:-3]
+            # remove everything after . if . exist
+            slug = slug.split(".")[0]
             slug = generate_storage_name(tweet) + '-' + slug
             slug = sanitize_yaml_line(slug)
 

@@ -6,11 +6,19 @@
     "configurations": [
 
         {
-            "name": "convert",
+            "name": "convert-test",
             "type": "debugpy",
             "request": "launch",
             "program": "convert.py",
             "args": ["--input", "D:\\GitHubSrc\\Tweeter2Blog\\sample.json", "--output", "D:\\temp\\tweet_posts", "--user_id", "7637292", "--user_name", "sytelus"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "convert-full",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "convert.py",
+            "args": ["--input", "D:\\Dropbox\\Per\\tweets.json", "--output", "D:\\temp\\tweet_posts", "--user_id", "7637292", "--user_name", "sytelus"],
             "console": "integratedTerminal"
         }
     ]
