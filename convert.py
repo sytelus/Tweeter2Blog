@@ -31,6 +31,8 @@ class ModelAPI:
 
         self.available = all([self.api_key, self.api_endpoint, self.model_name])
         self.semaphore = asyncio.Semaphore(max_reqs)
+        if not self.available:
+            log.warning("Model API is not available. Please set MODEL_API_KEY, MODEL_API_ENDPOINT, and MODEL_NAME environment variables.")
 
     async def send_message(self, session:aiohttp.ClientSession, message):
         if not self.available:
