@@ -347,6 +347,10 @@ def sanitize_yaml_line(value, for_quoting_inside="'"):
     safe_value = safe_value.strip()
     safe_value = safe_value.rstrip("'")
     safe_value = safe_value.strip()
+    safe_value = safe_value.lstrip(""")
+    safe_value = safe_value.strip()
+    safe_value = safe_value.rstrip(""")
+    safe_value = safe_value.strip()
     safe_value = safe_value.lstrip("-")
     safe_value = safe_value.strip()
     safe_value = safe_value.rstrip(".")
@@ -369,22 +373,27 @@ def is_draft(tweet, draft_before_date:str):
             return True
     return False
 
-async def build_frontmatter(session, api: ModelAPI, tweet, args):
-    """
-    Build the markdown frontmatter for a tweet blog post.
+def build_frontmatter(tweet:dict, title:str, slug:str, draft:bool):
+    frontmatter = (
+        f"---\n"
+        f"title: '{title}'\n"
+        f"draft: {str(draft).lower()}\n"
+        # https://gohugo.io/content-management/front-matter/#dates
+        f"date: {convert_to_utc(tweet['created_at']).isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
+        f"slug: '{slug}'\n"
+        f"is_tweet: true\n"
+        f"tweet_info:\n"
+        f"  id: '{tweet.get('id_str', '<missing>')}'\n"
+        f"  type: '{tweet.get('type', '<missing>').lower()}'\n"
+        f"  is_thread: {tweet.get('is_thread', False)}\n"
+        f"---\n\n"
+    )
 
-    Parameters:
-        session: The HTTP session to be used for API requests.
-        api (ModelAPI): An instance of ModelAPI to generate title and slug.
-        tweet (dict): The tweet data.
-        draft (bool): Whether the post is a draft.
+    return frontmatter
 
-    Returns:
-        A tuple (frontmatter, slug) where frontmatter is the markdown string,
-        and slug is the generated slug.
-    """
+async def frontmatter_from_model(session, api: ModelAPI, tweet, args)-> Tuple[bool, str, str]:
     # Convert tweet creation time to UTC and generate a formatted date string.
-    frontmatter, slug = None, None
+    api_failed, frontmatter, slug = True, "", ""
 
     if api.available:
         retries = 5
@@ -401,10 +410,12 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
             if len(tweet_content) > MIN_TWEET_LENGTH and len(tweet_content.split()) > 1:
                 try:
                     prompt = (
-                        "For below tweet, create a very short creatively funny but clever and informative title "
-                        "for the frontmatter to be used in blog and return it in the first line.\n"
-                        "In the next line, create a short valid file name where this blog post can be saved.\n"
-                        "Do not include anything else in your response.\n\n"
+                        "For the below tweet, please generate the title and the slug values for the frontmatter to be used in static website generator Hugo. "
+                        "The first line of your response should contain the title and the second line of your response should contain the slug. Your response must not contain anything else. "
+                        "The title you generate should be short and creatively funny but clever and informative. "
+                        "The slug you generate must be a short file name without extension and without utilizing special characters except dash and underscore. "
+                        "If you are unable to generate a good title and slug because tweet does not have sufficient information then please use single word SKIP for both. "
+                        "\n\nBelow is the content of the tweet:\n\n"
                         f"{tweet_content}"
                     )
                     response = await api.send_message(session, prompt)
@@ -430,25 +441,22 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
                 if len(lines) < 2:
                     continue
 
+                api_failed = False
                 draft = is_draft(tweet, args.draft_before_date)
-            else:
-                # replace new lines with space
-                tweet_content = tweet_content.replace("\n", " ") or "No content"
-                lines = [tweet_content, tweet_content]
-                draft = True
+            else: # tweet is too short or doesn't have enough words
+                api_failed = False
+                break
 
             # Process title.
-            title = lines[0].replace('"', "'").strip()
-            if len(title) < 3:
-                continue
-            if title.startswith("'") and title.endswith("'"):
-                title = title[1:-1].strip()
-            if len(title) < 3:
-                continue
+            title = lines[0].strip()
+            if len(title) <= len("SKIP"):
+                break # model can't generate title
             title = sanitize_yaml_line(title, for_quoting_inside="'")
 
             # Process slug.
             raw_slug = lines[1].strip()
+            if len(raw_slug) <= len("SKIP"):
+                break # model can't generate slug
             slug = sanitize_filename(raw_slug)
             # remove everything after . if . exist
             slug = slug.split(".")[0]
@@ -456,23 +464,12 @@ async def build_frontmatter(session, api: ModelAPI, tweet, args):
             slug = sanitize_yaml_line(slug, for_quoting_inside="'")
 
             # Build the frontmatter markdown string.
-            frontmatter = (
-                f"---\n"
-                f"title: '{title}'\n"
-                f"draft: {str(draft).lower()}\n"
-                # https://gohugo.io/content-management/front-matter/#dates
-                f"date: {convert_to_utc(tweet['created_at']).isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
-                f"slug: '{slug}'\n"
-                f'is_tweet: true\n'
-                f'tweet_info:\n'
-                f'  id: "{tweet["id_str"]}"\n'
-                f'  type: "{tweet["type"].lower()}"\n'
-                f'  is_thread: {tweet.get("is_thread", False)}\n'
-                f"---\n\n"
-            )
+            frontmatter = build_frontmatter(tweet, title, slug, draft)
             break  # Success; exit the retry loop.
+    else:
+        api_failed = False
 
-    return frontmatter, slug
+    return api_failed, frontmatter, slug
 
 
 def twitter_handles_to_links(text):
@@ -582,26 +579,15 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
     storage_name = generate_storage_name(tweet)
 
     # get frontmatter and slug (slug will replace storage_name)
-    frontmatter, slug = await build_frontmatter(session, api, tweet, args)
+    api_failed_, frontmatter, slug = await frontmatter_from_model(session, api, tweet, args)
+    api_failed += 1 if api_failed_ else 0
     if frontmatter and slug:
         storage_name = slug
     else:
-        api_failed += 1
         create_date = convert_to_utc(tweet['created_at'])
         slug = storage_name
-        frontmatter = (
-            f"---\n"
-            f'title: "Tweet on {create_date.isoformat()}"\n'
-            f"draft: true\n"
-            f"date: {create_date.isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
-            f'slug: "{slug}"\n'
-            f'is_tweet: true\n'
-            f'tweet_info:\n'
-            f'  id: "{tweet["id_str"]}"\n'
-            f'  type: "{tweet["type"].lower()}"\n'
-            f'  is_thread: {tweet.get("is_thread", False)}\n'
-            f"---\n\n"
-        )
+        frontmatter = build_frontmatter(tweet, f"Tweet on {create_date.isoformat()}", slug, True)
+
     tweet["mark_down"] = frontmatter + '\n\n' + tweet["mark_down"]
 
     # now we will replace the followings:
