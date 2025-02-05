@@ -67,11 +67,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="Path to the output directory")
     parser.add_argument("--user_id", required=True, help="User ID to identify threads")
     parser.add_argument("--user_name", required=True, help="User name to link to twitter")
+    parser.add_argument("--draft_before_date", required=False, default="2018-01-01", help="All tweets before this isoformat date will be put in draft mode to avoid publishing old tweets")
     return parser.parse_args()
 
 def convert_to_utc(dt_str: str) -> datetime:
-    dt = datetime.strptime(dt_str, "%a %b %d %H:%M:%S +0000 %Y")
-    return dt.replace(tzinfo=timezone.utc)
+    # twitter date format is "Tue Feb 04 18:34:08 +0000 2025"
+    return datetime.strptime(dt_str, "%a %b %d %H:%M:%S +0000 %Y").astimezone(timezone.utc)
 
 def find_thread_root(tweet_id: str, reply_graph: nx.DiGraph) -> str:
     while True:
@@ -84,19 +85,80 @@ def get_thread_sequence(root_id: str, tweet_map: Dict[str, Dict], reply_graph: n
     tweets = [(t, convert_to_utc(tweet_map[t]["created_at"])) for t in nx.dfs_preorder_nodes(reply_graph, source=root_id)]
     return [t[0] for t in sorted(tweets, key=lambda x: x[1])]
 
-def classify_tweets(tweet_map: Dict[str, Dict]) -> None:
+def parse_triple_dot_endings(text: str):
+    """
+    Looks at the input multiline string and checks if it ends with the following pattern:
+
+        <prefix><three dots><whitespace><zero or more URLs separated by whitespace>
+
+    Returns a tuple:
+       (is_pattern_found, prefix, list_of_urls)
+
+    - is_pattern_found: True if the pattern is found at the end of the string, False otherwise.
+    - prefix: The part of the string before the three dots.
+    - list_of_urls: A list of URL tokens (if any) that follow the three dots.
+    """
+    # The regex explanation:
+    #   ^                         : start of string
+    #   (?P<prefix>.*)            : capture any characters (including newlines) as prefix (greedy)
+    #   \.\.\.                    : literally three dots
+    #   \s+                       : at least one whitespace character (required)
+    #   (?P<urls>(?:\S+\s*)*)     : capture zero or more groups of non-whitespace (the URL)
+    #                              characters optionally followed by whitespace.
+    #   $                         : end of string
+    #
+    # We use re.DOTALL so that '.' matches newline characters as well.
+    pattern = re.compile(
+        r'^(?P<prefix>.*?)\.\.\.\s+(?P<urls>(?:https?://\S+(?:\s+|$))*)$',
+        re.DOTALL
+    )
+    match = pattern.fullmatch(text)
+    if not match:
+        return False, None, []
+
+    prefix = match.group('prefix')
+    urls_str = match.group('urls').strip()  # Remove any trailing spaces
+    # If there are URLs, split on whitespace, otherwise return an empty list.
+    urls = urls_str.split() if urls_str else []
+
+    return True, prefix, urls
+
+
+def classify_tweets(tweet_map: Dict[str, Dict], reply_graph:nx.DiGraph) -> None:
+    # first identify replies and retweets
     for tweet in tweet_map.values():
         text = tweet["full_text"].strip()
         assert "type" not in tweet
 
-        if tweet.get("is_thread", ""):
-            tweet["type"] = "Thread"
-        elif text.startswith("RT @"):
+        # We adopt pretty bad heuristics here because apparently data don't have critical info
+        # 1. below seems to be the only way to identify retweets
+        # 2. also, quoted tweets won't have RT prefix! There is no reliable way to identify quoted tweets
+        # 3. retweets also don't have in_reply_to_status_id_str
+        if text.startswith("RT @"):
             tweet["type"] = "Retweet"
-        elif text.startswith("@"):
+        elif "in_reply_to_status_id_str" in tweet:
+            # note that self replies won't start with "@<reply-to-user>"
             tweet["type"] = "Reply"
         else:
-            tweet["type"] = "Post"
+            tweet["type"] = "Post" # this will include quoted tweets
+
+    # Now identify threads. A chain of reply posts are not considered as a thread
+    for tweet_id, tweet in tweet_map.items():
+        assert "type" in tweet, f"at this point all tweets should have type: {tweet}"
+        if tweet.get("is_thread", ""): # only process candidate threads
+            # is it a root tweet?
+            root_id = find_thread_root(tweet_id, reply_graph)
+            if root_id != tweet_id:
+                continue
+            if tweet["type"] != "Post":
+                continue
+            # get the chain and if start node is a post then it's a thread
+            sequence = get_thread_sequence(root_id, tweet_map, reply_graph)
+            assert all(tweet_map[t]["is_thread"] for t in sequence), f"Thread has non-thread tweets: {sequence}"
+            assert len(sequence) > 1, f"Thread has only one tweet: {sequence}"
+            # if the the first tweet is a post then we have a thread
+            for t in sequence:
+                tweet_map[t]["type"] = "Thread"
 
 def generate_storage_name(tweet: Dict) -> str:
     dt_utc = convert_to_utc(tweet["created_at"])
@@ -120,17 +182,7 @@ def post_link(tweet: Dict, args):
     if 'id_str' in tweet and args.user_name:
         return f"https://x.com/{args.user_name}/status/{tweet['id_str']}"
 
-def format_markdown(tweet: Dict) -> str:
-    content = []
-    date_utc = convert_to_utc(tweet["created_at"]).isoformat()
-    content.append(f"---\n")
-    content.append(f"title: \"{tweet['full_text'][:50]}\"\n")
-    content.append(f"draft: false\n")
-    content.append(f"date: {date_utc}\n")
-    content.append(f"slug: \"{tweet['id_str']}\"\n")
-    content.append(f"---\n\n")
-    content.append(tweet["full_text"])
-    return "".join(content)
+
 
 def extract_twitter_urls(text):
     # This regular expression will find all occurrences of http://t.co/{id}
@@ -209,7 +261,7 @@ def id_from_url(url):
     match = re.search(pattern, url)
     return match.group(1) if match else None
 
-def get_final_url(url, timeout=10):
+def get_redirected_url(url, timeout=10):
     try:
         # Using a HEAD request first can be more efficient,
         # but some servers don't handle HEAD properly so we fall back to GET.
@@ -243,7 +295,7 @@ def build_twittr_url_replacements(tweet_map: Dict[str, Dict]) -> None:
                     'image_alt': ''
                 }
             else:
-                final_url = get_final_url(url)
+                final_url = get_redirected_url(url)
                 replacements[url] = { 'expanded': final_url }
 
         tweet["replacements"] = replacements
@@ -293,7 +345,22 @@ def sanitize_yaml_line(value):
 
     return safe_value
 
-async def build_frontmatter(session, api: ModelAPI, tweet, draft=True):
+def is_draft(tweet, draft_before_date:str):
+    # if its not a post or thread then its a draft
+    if tweet["type"] not in ["Post", "Thread"]:
+        return True
+
+    if draft_before_date:
+        # if tweet is before draft_before_date then it's a draft (assume isoformat strings)
+        last_date = datetime.fromisoformat(draft_before_date)
+        # if doesn't have time zone then force UTC
+        if last_date.tzinfo is None:
+            last_date = last_date.astimezone(timezone.utc)
+        if convert_to_utc(tweet["created_at"]) < last_date:
+            return True
+    return False
+
+async def build_frontmatter(session, api: ModelAPI, tweet, args):
     """
     Build the markdown frontmatter for a tweet blog post.
 
@@ -308,16 +375,6 @@ async def build_frontmatter(session, api: ModelAPI, tweet, draft=True):
         and slug is the generated slug.
     """
     # Convert tweet creation time to UTC and generate a formatted date string.
-    date_utc = convert_to_utc(tweet["created_at"]).isoformat()
-    # Format string as YYYYMMDDhhmm by removing punctuation.
-    date_str = (
-        date_utc.replace(":", "-")
-                .replace("T", "-")
-                .split(".")[0]
-                .split("+")[0][:-2]
-                .replace("-", "")
-    )
-
     frontmatter, slug = None, None
 
     if api.available:
@@ -377,15 +434,17 @@ async def build_frontmatter(session, api: ModelAPI, tweet, draft=True):
             slug = sanitize_filename(raw_slug)
             if slug.endswith(".md"):
                 slug = slug[:-3]
-            slug = date_str + '-' + slug
+            slug = generate_storage_name(tweet) + '-' + slug
             slug = sanitize_yaml_line(slug)
+
+            draft = is_draft(tweet, args.draft_before_date)
 
             # Build the frontmatter markdown string.
             frontmatter = (
                 f"---\n"
                 f'title: "{title}"\n'
                 f"draft: {str(draft).lower()}\n"
-                f"date: {date_utc}\n"
+                f"date: {convert_to_utc(tweet['created_at']).isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
                 f'slug: "{slug}"\n'
                 f"---\n\n"
             )
@@ -394,7 +453,7 @@ async def build_frontmatter(session, api: ModelAPI, tweet, draft=True):
     return frontmatter, slug
 
 
-def replace_twitter_handles(text):
+def twitter_handles_to_links(text):
     # Using (?<!\S) ensures that the character before '@' is not a non-whitespace character,
     # i.e. it's either the start of the string or a whitespace.
     pattern = r"(?<!\S)@(\w+)"
@@ -413,9 +472,12 @@ def tweet_shortcode(tweet_id, user_name):
 
 async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGraph, tweet_map:Dict[str, Dict], api:ModelAPI, args:argparse.Namespace):
     tweet_type = tweet["type"]
-    tweet["mark_down"] = '\n' + tweet['full_text'] + '\n'
+    # new line after frontmatter
+    tweet["mark_down"] = tweet['full_text']
+
     mal_formed, download_failed, api_failed = 0, 0, 0
     if tweet_type == "Thread": # club content of a thread
+        # combine markdowns for all tweets in the thread
         root_id = find_thread_root(tweet_id, reply_graph)
         if root_id != tweet_id:
             return mal_formed, download_failed, api_failed
@@ -423,11 +485,14 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
         merged_replacements = {}
         for t in sequence:
             merged_replacements = merge_replacements(merged_replacements, tweet_map[t]["replacements"])
-        thread_text = "\n".join([tweet_map[t]["mark_down"].strip() for t in sequence])
+        # For markdown we need two newlines between each tweet
+        thread_text = "\n\n".join([tweet_map[t]["mark_down"].strip() for t in sequence])
+
         tweet = tweet_map[root_id]
         tweet["mark_down"] = thread_text
         tweet["replacements"] = merged_replacements
     elif tweet_type == "Reply": # replace @ with tweet link
+        # do we have info for "To" tweet?
         if 'in_reply_to_screen_name' in tweet and "in_reply_to_status_id_str" in tweet:
             reply_to_id = tweet["in_reply_to_status_id_str"]
             reply_to_user_id = tweet["in_reply_to_screen_name"]
@@ -435,6 +500,8 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
             parts = tweet['mark_down'].strip().split(maxsplit=1)
             assert len(parts) == 2, f"First word and then rest of the test expcted: {tweet['mark_down']}"
             assert parts[0].startswith("@"), f"First word should be a handle: {parts[0]}"
+
+            # "To" tweet using shortcode
             response_text = tweet_shortcode(reply_to_id, reply_to_user_id) + '\n\n' + parts[1]
             tweet["mark_down"] = response_text
         else:
@@ -442,37 +509,61 @@ async def convert_tweet(session, tweet_id:str, tweet: Dict, reply_graph:nx.DiGra
         # else sometimes this info is missing and we can't do anything
     # else no other processing for other types
 
+    # For retweets and quoted tweets, twitter truncates and ends with ... followed by URLs, first being the original tweet and rest being media
+    is_pattern_found, prefix, urls = parse_triple_dot_endings(tweet["mark_down"])
+    if is_pattern_found and prefix:
+        tweet["mark_down"] = prefix + '... ' + '[Continue reading](urls[0])'
+        for url in urls[1:]:
+            tweet["mark_down"] += f"\n\n{url}"
+
+    # generate default storage name, i.e., filename or folder name if tweet has media
     storage_name = generate_storage_name(tweet)
 
-    frontmatter, slug = await build_frontmatter(session, api, tweet)
+    # get frontmatter and slug (slug will replace storage_name)
+    frontmatter, slug = await build_frontmatter(session, api, tweet, args)
     if frontmatter and slug:
-        tweet["mark_down"] = frontmatter + tweet["mark_down"]
+        tweet["mark_down"] = frontmatter + '\n\n' + tweet["mark_down"]
         storage_name = slug
     else:
         api_failed += 1
 
-    content_filepath = os.path.join(args.output, tweet["type"].lower(), storage_name + ".md")
+    # now we will replace the followings:
+    # 1. twitter handles with markdown links
+    # 2. media URLs with local file paths
+    # 3. other URLs with markdown links
+    # first assert that storage name doesn't have any bad characters including . or new line
+    assert not re.search(r'[<>:"/\\|?*\.\n]', storage_name), f"Storage name has bad characters: {storage_name}"
+    base_folder = os.path.join(args.output, tweet["type"].lower())
+    # assume default as md file but we will change it to folder if tweet has media
+    content_filepath = os.path.join(base_folder, storage_name + ".md")
     if tweet["replacements"]:
         for url, replacement in tweet["replacements"].items():
-            if replacement.get("media_filename"):
-                content_folder = os.path.join(args.output, tweet["type"], storage_name)
+            expanded_url = replacement['expanded']
+            if replacement.get("media_filename"): # creat sub-folder for media files
+                content_folder = os.path.join(base_folder, storage_name)
                 os.makedirs(content_folder, exist_ok=True)
                 content_filepath = os.path.join(content_folder, "index.md")
-                filepath = await download_image(session, replacement['expanded'], content_folder, replacement["media_filename"])
+
+                filepath = await download_image(session, expanded_url, content_folder, replacement["media_filename"])
                 if filepath: # download success
-                    tweet["mark_down"] = tweet['mark_down'].replace(
-                        url, f"\n\n![{replacement['image_alt']}]({replacement['media_filename']})")
+                    tweet["mark_down"] = tweet['mark_down'].replace(url,
+                        f"\n\n![{replacement['image_alt'] or expanded_url}]({replacement['media_filename']})")
                 else: # download failed
                     download_failed += 1
-                    tweet["mark_down"] = tweet["mark_down"].replace(url, '<' + replacement["expanded"] + '>') # put URL in <> for markdown
+                    tweet["mark_down"] = tweet["mark_down"].replace(url,
+                        f"\n\n![{replacement['image_alt'] or url}]({expanded_url})")
             else: # not a media file URL
-                tweet["mark_down"] = tweet["mark_down"].replace(url, '<' + replacement["expanded"] + '>') # put URL in <> for markdown
-    tweet["mark_down"] = replace_twitter_handles(tweet["mark_down"]).strip()
+                tweet["mark_down"] = tweet["mark_down"].replace(url, f'<{expanded_url}>') # put URL in <> for markdown
+                # if URL was already in markdown, i.e., inside [...]() then remove <> that we just added
+                tweet["mark_down"] = tweet["mark_down"].replace(f'](<{expanded_url}>)', f']({expanded_url})')
+    # turn twitter handles into markdown links
+    tweet["mark_down"] = twitter_handles_to_links(tweet["mark_down"]).strip()
     # add post link
     tweet["mark_down"] += f"\n\n[Discussion]({post_link(tweet, args)})"
     # markdown doesn't end with a newline, add it
     tweet["mark_down"] = tweet["mark_down"].strip() + '\n'
 
+    # save the markdown content
     os.makedirs(os.path.dirname(content_filepath), exist_ok=True)
     with open(content_filepath, "w", encoding="utf-8") as f:
         f.write(tweet["mark_down"])
@@ -503,7 +594,7 @@ async def main() -> None:
     assert len(tweet_map) == len(tweets_data)
 
     build_graph(tweet_map, reply_graph, args.user_id)
-    classify_tweets(tweet_map)
+    classify_tweets(tweet_map, reply_graph)
     build_url_map(tweet_map)
     build_media_map(tweet_map)
     build_twittr_url_replacements(tweet_map)
