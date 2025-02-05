@@ -336,7 +336,7 @@ def merge_replacements(dict1, dict2):
 
 def sanitize_yaml_line(value):
     # Dump using PyYAML's safe representation
-    safe_value = yaml.dump(value, allow_unicode=True, default_style=None, width=float('inf'))
+    safe_value = yaml.dump(value, allow_unicode=True, default_style="'", width=float('inf'))
 
     # dump function is pretty bad and randomly adds "\n...\n", quotes, front separator etc
 
