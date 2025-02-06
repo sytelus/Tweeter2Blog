@@ -382,8 +382,8 @@ def build_frontmatter(tweet:dict, title:str, slug:str, draft:bool):
         f"date: {convert_to_utc(tweet['created_at']).isoformat()}\n" # frontmatter accepts isoforamt strings like '2025-02-05T02:34:08+00:00'
         f"slug: '{slug}'\n"
         f"tags:\n"
-        f"  - twitter\n"
-        f"  - {'twitter_' + tweet.get('type', 'unknown').lower()}\n"
+        f"  - tweets\n"
+        f"  - {'tweets_' + tweet.get('type', 'unknown').lower()}\n"
         f"is_tweet: true\n"
         f"tweet_info:\n"
         f"  id: '{tweet.get('id_str', '<missing>')}'\n"
