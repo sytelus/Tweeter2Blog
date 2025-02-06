@@ -28,7 +28,7 @@ def youtube_to_shortcode(text: str) -> str:
 
         # If we found a video id, return the shortcode; otherwise return the original match.
         if video_id:
-            return "{{< youtube {" + video_id + "} >}}"
+            return "{{< youtube " + video_id + " >}}"
         else:
             return match.group(0)
 
